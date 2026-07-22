@@ -25,7 +25,7 @@
 		"obsidian": "latest",
 		"pdfjs-dist": "^6.1.200",
 		"tsx": "^4.23.1",
-		"typescript": "^5.8.3",
+		"typescript": "^7.0.2",
 		"typescript-eslint": "^8.65.0",
 		"vitest": "^3.0.0"
 	}
