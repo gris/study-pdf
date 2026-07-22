@@ -17,7 +17,7 @@
 		"@cantoo/pdf-lib": "^2.7.4"
 	},
 	"devDependencies": {
-		"@types/node": "^22.15.17",
+		"@types/node": "^26.1.1",
 		"@typescript-eslint/parser": "^8.65.0",
 		"esbuild": "0.25.5",
 		"eslint": "^9.39.5",
