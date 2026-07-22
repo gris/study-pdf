@@ -53,22 +53,53 @@ const INTERNALS_ERROR =
 	'Study PDF: could not find the PDF viewer internals on this version of Obsidian. ' +
 	'This plugin relies on an undocumented internal API that may have changed -- please report this issue.';
 
-type Unsafe = any;
+// Minimal local shapes for the live, untyped pdf.js objects reached through
+// Obsidian's internals -- same approach as PdfViewportLike in geometry.ts:
+// capture only the properties/methods actually used, rather than depending on
+// pdfjs-dist's real (and version-specific) types, or on `any` (which is what
+// used to be here -- replaced so property access on these objects is type-
+// checked instead of unsafely flowing through `any`). Each is still a
+// best-effort description of an object we don't control; every call site that
+// depends on one still runtime-checks it before trusting it (see
+// INTERNALS_ERROR), because a wrong TYPE declaration wouldn't be caught by
+// the compiler the way a wrong runtime shape is.
+interface PdfJsPageView {
+	viewport?: PdfViewportLike;
+	renderingState?: number;
+}
+
+interface PdfJsDocumentLike {
+	getPage: (pageNumber: number) => unknown;
+}
+
+interface PdfJsPdfViewer {
+	getPageView: (pageIndex: number) => PdfJsPageView | undefined;
+	pdfDocument?: PdfJsDocumentLike;
+	currentPageNumber: number;
+}
+
+interface PdfJsAnnotationData {
+	data?: { subtype?: string };
+}
+
+type RenderAnnotationPopupFn = (annotation: PdfJsAnnotationData) => unknown;
+
+interface PdfViewerChild {
+	renderAnnotationPopup?: RenderAnnotationPopupFn;
+	pdfViewer?: {
+		pdfViewer?: PdfJsPdfViewer;
+	};
+}
 
 interface RawPdfView {
 	file: TFile | null;
 	containerEl: HTMLElement;
 	viewer?: {
-		child?: {
-			renderAnnotationPopup?: unknown;
-			pdfViewer?: {
-				pdfViewer?: Unsafe;
-			};
-		};
+		child?: PdfViewerChild;
 	};
 }
 
-function getLivePdfViewer(view: RawPdfView): Unsafe {
+function getLivePdfViewer(view: RawPdfView): PdfJsPdfViewer {
 	const pdfViewer = view.viewer?.child?.pdfViewer?.pdfViewer;
 	if (!pdfViewer || typeof pdfViewer.getPageView !== 'function') {
 		throw new Error(INTERNALS_ERROR);
@@ -93,14 +124,17 @@ function getLivePdfViewer(view: RawPdfView): Unsafe {
  * current and future PDF views at once. */
 export function patchNativeAnnotationPopup(app: App): (() => void) | null {
 	for (const leaf of app.workspace.getLeavesOfType('pdf')) {
-		const child = (leaf.view as unknown as RawPdfView).viewer?.child as Unsafe;
+		const child = (leaf.view as unknown as RawPdfView).viewer?.child;
 		if (!child || typeof child.renderAnnotationPopup !== 'function') continue;
 
-		const proto = Object.getPrototypeOf(child);
-		if (typeof proto?.renderAnnotationPopup !== 'function') continue;
+		// Object.getPrototypeOf's own lib.es5.d.ts signature returns `any` --
+		// this cast is what turns that implicit any into a checked type instead
+		// of letting it flow through unsafely.
+		const proto = Object.getPrototypeOf(child) as PdfViewerChild;
+		if (typeof proto.renderAnnotationPopup !== 'function') continue;
 
 		const original = proto.renderAnnotationPopup;
-		proto.renderAnnotationPopup = function (annotation: Unsafe) {
+		proto.renderAnnotationPopup = function (this: unknown, annotation: PdfJsAnnotationData) {
 			if (annotation?.data?.subtype === 'Highlight') return;
 			return original.call(this, annotation);
 		};

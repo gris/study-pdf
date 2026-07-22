@@ -1,7 +1,7 @@
 {
 	"id": "study-pdf",
 	"name": "Study PDF",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"minAppVersion": "1.4.4",
 	"description": "Highlight text and add notes to PDFs, saved into the file itself so they work in any reader — with a built-in page to browse, jump to, and copy them all.",
 	"author": "João Gris",

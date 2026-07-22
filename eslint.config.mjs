@@ -19,21 +19,4 @@ export default defineConfig([
 			parserOptions: { project: './tsconfig.json' },
 		},
 	},
-	{
-		// The one file allowed to touch undocumented Obsidian/PDF.js internals
-		// (see its own header comment) -- their shape is inherently untyped, so
-		// `any` and the unsafe-* rules it trips are the deliberate point of this
-		// file, not an oversight. A config-level override, not inline disables:
-		// obsidianmd's config blocks inline-disabling no-explicit-any outright
-		// (eslint-comments/no-restricted-disable), precisely to stop it being
-		// silenced piecemeal instead of contained to one reviewable file.
-		files: ['src/obsidian-pdf-internals.ts'],
-		rules: {
-			'@typescript-eslint/no-explicit-any': 'off',
-			'@typescript-eslint/no-unsafe-assignment': 'off',
-			'@typescript-eslint/no-unsafe-member-access': 'off',
-			'@typescript-eslint/no-unsafe-call': 'off',
-			'@typescript-eslint/no-unsafe-return': 'off',
-		},
-	},
 ]);
