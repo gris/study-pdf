@@ -1,6 +1,6 @@
 {
 	"name": "study-pdf",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"description": "Highlight text and add notes to PDFs, saved into the file itself so they work in any reader — with a built-in page to browse, jump to, and copy them all.",
 	"main": "main.js",
 	"type": "module",
