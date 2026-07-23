@@ -66,11 +66,12 @@ export default class PdfHighlighterPlugin extends Plugin {
 	 * elsewhere can close it and so we never show two at once. */
 	private activePopup: IconPopup | null = null;
 
-	/** Toolbar-right elements we've already added our button to -- a PDF view's
-	 * toolbar persists across file reloads (confirmed reading Obsidian's shipped
-	 * app.js: only the inner pdf.js viewer is torn down on reload, not the
-	 * outer toolbar), so this only needs to happen once per opened PDF tab. */
-	private readonly toolbarButtonsInjected = new WeakSet<HTMLElement>();
+	/** Shared debounce for both the mouseup-triggered check and the
+	 * selectionchange-triggered one (see the 'selectionchange' listener in
+	 * onload): whichever fires last wins, so a normal desktop drag-then-release
+	 * coalesces into the single immediate mouseup call instead of an extra
+	 * rebuild ~200ms later. */
+	private selectionUpdateTimer = 0;
 
 	async onload() {
 		await this.loadSettings();
@@ -108,9 +109,37 @@ export default class PdfHighlighterPlugin extends Plugin {
 			if (this.isInsideActivePopup(evt.target)) return;
 			// A selection isn't final the instant mouseup fires in every browser;
 			// yielding a tick first avoids reading a stale/incomplete selection.
-			window.setTimeout(() => void this.updateSelectionMenu(), 0);
+			this.scheduleSelectionUpdate(0, 'full');
 		});
-		this.registerDomEvent(document, 'scroll', () => this.hideActiveMenu(), true);
+		// Dismisses the popup once the page scrolls away underneath it -- except
+		// while focus is inside the popup itself (the note editor's textarea).
+		// On mobile, focusing that textarea makes the OS scroll the page to lift
+		// it above the on-screen keyboard, firing a real 'scroll' event that's
+		// otherwise indistinguishable from the user scrolling the PDF away; without
+		// this guard the note editor closed itself the instant it was focused.
+		this.registerDomEvent(
+			document,
+			'scroll',
+			() => {
+				if (this.isInsideActivePopup(document.activeElement)) return;
+				this.hideActiveMenu();
+			},
+			true,
+		);
+
+		// A touch text selection is made by long-pressing then dragging the
+		// native selection handles -- on touchscreens that handle drag is a
+		// native OS/WebView gesture that never dispatches a page-level mouseup,
+		// so the mouseup listener above alone would only ever show the popup for
+		// whatever got selected on the initial long-press. `selectionchange`
+		// fires for every adjustment regardless of how the selection changed
+		// (mouse drag included), so debouncing off it keeps the popup in sync
+		// with the selection as it's extended. Not mobile-only: this also runs
+		// (and gets exercised) during an ordinary desktop mouse-drag.
+		this.registerDomEvent(document, 'selectionchange', () => {
+			this.scheduleSelectionUpdate(200, 'selection-only');
+		});
+		this.register(() => window.clearTimeout(this.selectionUpdateTimer));
 
 		this.addCommand({
 			id: 'highlight-selection',
@@ -174,14 +203,19 @@ export default class PdfHighlighterPlugin extends Plugin {
 	/** Adds our "show highlights" button to every open PDF view's own toolbar
 	 * (the bar with zoom/page controls) that doesn't already have one. Runs on
 	 * layout changes since new PDF tabs need it added, and re-running on tabs
-	 * that already have it is a no-op via toolbarButtonsInjected. */
+	 * that already have it is a no-op -- checked against the live DOM (a marker
+	 * class on the button), not an in-memory set: a PDF view's toolbar persists
+	 * not just across file reloads but across a *plugin* reload too (confirmed
+	 * reading Obsidian's shipped app.js: only the inner pdf.js viewer is torn
+	 * down on file reload, and a plugin reload doesn't touch the view at all),
+	 * while an in-memory set would reset to empty on every plugin reload and
+	 * duplicate the button on every one after the first. */
 	private ensureToolbarButtons() {
 		for (const pdfView of getAllPdfViews(this.app)) {
 			const toolbarRight = pdfView.getToolbarRightElement();
-			if (!toolbarRight || this.toolbarButtonsInjected.has(toolbarRight)) continue;
-			this.toolbarButtonsInjected.add(toolbarRight);
+			if (!toolbarRight || toolbarRight.querySelector(':scope > .study-pdf-toolbar-button')) continue;
 
-			const button = toolbarRight.createDiv('clickable-icon');
+			const button = toolbarRight.createDiv('clickable-icon study-pdf-toolbar-button');
 			setIcon(button, 'list-checks');
 			setTooltip(button, 'Show all highlights and notes');
 			button.addEventListener('click', () => new HighlightListModal(this.app, pdfView).open());
@@ -255,29 +289,55 @@ export default class PdfHighlighterPlugin extends Plugin {
 		return ctx;
 	}
 
+	/** Coalesces the mouseup-triggered ('full') and selectionchange-triggered
+	 * ('selection-only') checks onto one timer -- see selectionUpdateTimer's
+	 * doc comment. */
+	private scheduleSelectionUpdate(delayMs: number, mode: 'full' | 'selection-only') {
+		window.clearTimeout(this.selectionUpdateTimer);
+		this.selectionUpdateTimer = window.setTimeout(() => {
+			if (mode === 'full') void this.updateSelectionMenu();
+			else this.updateSelectionPopupForLiveSelection();
+		}, delayMs);
+	}
+
+	/** Shows/refreshes the "add highlight" color-dot popup for whatever the
+	 * current text selection is, or does nothing if the selection is collapsed
+	 * (e.g. it just got cleared by performHighlight). Used by the
+	 * selectionchange path, which -- unlike a mouseup -- can't tell whether "no
+	 * selection" means "check for a highlight to remove instead": a selection
+	 * merely collapsing isn't the same user action as a deliberate click. */
+	private updateSelectionPopupForLiveSelection() {
+		const selectionCtx = this.trySelectionContext();
+		if (selectionCtx) this.showAddHighlightPopup(selectionCtx);
+	}
+
+	private showAddHighlightPopup(selectionCtx: SelectionContext) {
+		const range = window.getSelection()!.getRangeAt(0); // trySelectionContext just confirmed this exists
+		const rect = range.getBoundingClientRect();
+		const doc = selectionCtx.pdfView.containerEl.ownerDocument;
+
+		// Default color first: it's the most likely pick, so it gets the spot
+		// closest to where the cursor already is.
+		const colors = [...this.settings.colors].sort(
+			(a, b) =>
+				Number(b.name === this.settings.defaultColorName) - Number(a.name === this.settings.defaultColorName),
+		);
+		const buttons: PopupButton[] = colors.map((color) => ({
+			type: 'color',
+			hex: color.hex,
+			name: color.name,
+			onClick: () => void this.performHighlight(selectionCtx, hexToRgbColor(color.hex)),
+		}));
+		this.showPopup(doc, { x: rect.left, y: rect.bottom + 4 }, buttons);
+	}
+
 	/** Runs on every mouseup: shows the "add highlight" color-dot popup for a
 	 * real text selection, or (if there's no selection but a highlight exists
 	 * right where the user just clicked) the trash-icon "remove" popup instead. */
 	private async updateSelectionMenu() {
 		const selectionCtx = this.trySelectionContext();
 		if (selectionCtx) {
-			const range = window.getSelection()!.getRangeAt(0); // trySelectionContext just confirmed this exists
-			const rect = range.getBoundingClientRect();
-			const doc = selectionCtx.pdfView.containerEl.ownerDocument;
-
-			// Default color first: it's the most likely pick, so it gets the spot
-			// closest to where the cursor already is.
-			const colors = [...this.settings.colors].sort(
-				(a, b) =>
-					Number(b.name === this.settings.defaultColorName) - Number(a.name === this.settings.defaultColorName),
-			);
-			const buttons: PopupButton[] = colors.map((color) => ({
-				type: 'color',
-				hex: color.hex,
-				name: color.name,
-				onClick: () => void this.performHighlight(selectionCtx, hexToRgbColor(color.hex)),
-			}));
-			this.showPopup(doc, { x: rect.left, y: rect.bottom + 4 }, buttons);
+			this.showAddHighlightPopup(selectionCtx);
 			return;
 		}
 

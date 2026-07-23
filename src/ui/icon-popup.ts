@@ -23,9 +23,14 @@ function positionPopup(doc: Document, el: HTMLElement, position: { x: number; y:
 	el.setCssStyles({ left: '0px', top: '0px' });
 	const { width, height } = el.getBoundingClientRect();
 	const win = doc.defaultView ?? window;
+	// visualViewport shrinks when the on-screen keyboard opens (e.g. for the
+	// note editor's textarea); innerWidth/innerHeight don't, so clamping
+	// against those alone could place the popup behind the keyboard.
+	const viewportWidth = win.visualViewport?.width ?? win.innerWidth;
+	const viewportHeight = win.visualViewport?.height ?? win.innerHeight;
 	el.setCssStyles({
-		left: `${Math.max(4, Math.min(position.x, win.innerWidth - width - 4))}px`,
-		top: `${Math.max(4, Math.min(position.y, win.innerHeight - height - 4))}px`,
+		left: `${Math.max(4, Math.min(position.x, viewportWidth - width - 4))}px`,
+		top: `${Math.max(4, Math.min(position.y, viewportHeight - height - 4))}px`,
 	});
 }
 
