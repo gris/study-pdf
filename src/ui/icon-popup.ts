@@ -84,11 +84,13 @@ export function showNoteEditorPopup(
 ): IconPopup {
 	const el = doc.body.createDiv({ cls: 'study-pdf-popup' });
 
+	// createEl's `value` option only reflects for <input> elements, not
+	// <textarea> -- set it directly so an existing note is pre-filled.
 	const input = el.createEl('textarea', {
 		cls: 'study-pdf-note-input',
-		value: options.initial,
 		placeholder: 'Note…',
 	});
+	input.value = options.initial;
 
 	const row = el.createDiv({ cls: 'study-pdf-popup-row' });
 	const makeButton = (icon: string, label: string, onClick: () => void) => {
