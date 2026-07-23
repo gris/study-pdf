@@ -10,11 +10,12 @@
    .pdf-container ancestor, in case the mobile viewer nests the text layer
    differently (that would silently fall back to pdf.js's own much fainter
    default, rgba(0, 0, 255, 0.25), confirmed present in app.css too).
-   !important: pdf.js injects its own textLayer stylesheet lazily when a PDF
-   view first mounts, sometimes after this one, so cascade order alone can't
-   be relied on to win the tie. */
-.textLayer ::selection {
-	background-color: var(--color-accent) !important;
+   The tripled class beats app.css's two-class selector on specificity alone
+   (0,3,1) > (0,2,1) -- needed because pdf.js injects its own textLayer
+   stylesheet lazily when a PDF view first mounts, sometimes after this one,
+   so cascade order can't be relied on to win the tie. */
+.textLayer.textLayer.textLayer ::selection {
+	background-color: var(--color-accent);
 }
 
 /* Compact icon popup shown over the PDF (color dots to highlight, trash to
