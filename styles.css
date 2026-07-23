@@ -2,6 +2,21 @@
 	fill: currentColor;
 }
 
+/* Obsidian already ships a solid, fully-opaque selection color for exactly
+   this case -- app.css has `.pdf-container .textLayer ::selection { background-
+   color: var(--color-accent); }`, and --color-accent is a plain opaque hsl(),
+   not a transparent mix. A translucent color-mix() override (tried first)
+   was actually a step down from that. Re-applied here without requiring the
+   .pdf-container ancestor, in case the mobile viewer nests the text layer
+   differently (that would silently fall back to pdf.js's own much fainter
+   default, rgba(0, 0, 255, 0.25), confirmed present in app.css too).
+   !important: pdf.js injects its own textLayer stylesheet lazily when a PDF
+   view first mounts, sometimes after this one, so cascade order alone can't
+   be relied on to win the tie. */
+.textLayer ::selection {
+	background-color: var(--color-accent) !important;
+}
+
 /* Compact icon popup shown over the PDF (color dots to highlight, trash to
    remove). Theme variables only -- no hardcoded colors -- so it stays readable
    in any light/dark theme, exactly like Obsidian's own menus. */
