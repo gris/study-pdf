@@ -24,9 +24,18 @@ side.
   highlight's comment in Adobe/Preview too. Unicode-safe.
 - **Remove**: click a highlight, hit the trash button (or the *Remove highlight at
   selection* command).
-- **Overview**: *Show all highlights and notes* lists every highlight in the document
-  (color, recovered quoted text, note, page), with click-to-jump and copy buttons —
-  as Obsidian annotation deep links (`#page=N&annotation=ID`) or as plain Markdown.
+- **Overview**: *Show all highlights and notes* — from the command palette or the
+  list button the plugin adds to the PDF view's own toolbar — lists every highlight
+  in the document (color, recovered quoted text, note, page), with click-to-jump and
+  copy buttons — as Obsidian annotation deep links (`#page=N&annotation=ID`) or as
+  plain Markdown.
+- **Settings**: the palette is fixed, but you pick which color is the default (the
+  one the *Highlight selection* command uses, and the first dot in the popup) by
+  starring it in the plugin's settings tab.
+- **Mobile**: works on phones and tablets too. Extending a touch selection by
+  dragging the native handles keeps the color popup in sync, and popups are
+  positioned against the visual viewport so the on-screen keyboard doesn't cover
+  the note editor.
 - **Encrypted PDFs**: permission-restricted files (owner password, no open password —
   the common "protected" textbook/scan) are decrypted transparently. Note the saved
   file comes out decrypted. Files that genuinely require a password to open are
@@ -57,13 +66,24 @@ plugin fails loudly with a clear message rather than misbehaving silently.
 npm install
 npm run dev     # esbuild watch mode
 npm run build   # typecheck + production build -> main.js
-npm test        # vitest — geometry/annotate unit + round-trip tests
+npm test        # vitest — geometry/annotate/text-extraction unit + round-trip tests
 npm run lint    # eslint-plugin-obsidianmd -- same checks the community-plugin review does
 ```
 
 To try it in a vault: build, then symlink `main.js`, `manifest.json`, and `styles.css`
 into `<vault>/.obsidian/plugins/study-pdf/`, then reload Obsidian and enable the
 plugin under Community Plugins.
+
+The unit tests only cover the pure modules; anything touching the viewer, popups, or
+selection has to be exercised in a running Obsidian. With the symlink in place, the
+`obsidian` CLI makes that loop quick:
+
+```bash
+npm run build && obsidian plugin:reload id=study-pdf
+```
+
+then `obsidian dev:errors`, `obsidian dev:console`, `obsidian dev:dom selector=...`,
+and `obsidian dev:screenshot path=...` to inspect the result.
 
 ### Releases
 
@@ -88,6 +108,9 @@ warnings in `eslint.config.mjs`, with the reasoning next to each call site in
   imports. Uses `@cantoo/pdf-lib` (pdf-lib fork with decryption support).
 - `src/geometry.ts` — pure coordinate mapping: selection rects → PDF `QuadPoints`,
   calibrated against reference marker software.
+- `src/pdf-text-extraction.ts` — pure text recovery: maps a highlight's quads back
+  onto a page's text items to reconstruct the quoted text when a highlight has no
+  quote stored (highlights made in other readers, or by older plugin versions).
 - `src/obsidian-pdf-internals.ts` — the ONLY module touching undocumented
   Obsidian/PDF.js internals (viewer access, native popup suppression).
 - `src/ui/` — icon popup, note editor, reload curtain, highlights list modal.
@@ -99,4 +122,3 @@ warnings in `eslint.config.mjs`, with the reasoning next to each call site in
 - Scanned PDFs without a text layer can't be text-highlighted.
 - Annotation deep links can break for a highlight if the file is later re-saved
   (object numbers may shift); the page part of the link keeps working.
-- Desktop only for now.
