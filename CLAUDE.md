@@ -18,8 +18,7 @@ npm run lint                           # eslint-plugin-obsidianmd; must exit cle
 ```
 
 `main.js` at the repo root is a build artifact and is **gitignored** — CI rebuilds it for
-each release. Never hand-edit it, and don't expect it in a diff; the dev vaults consume the
-local build directly (symlinked for `joao`, copied for `psicologia`).
+each release. Never hand-edit it, and don't expect it in a diff.
 
 ## Testing in a live Obsidian
 
@@ -27,11 +26,17 @@ Unit tests only cover the pure modules. Everything involving the viewer, popups,
 selection, or the reload curtain has to be checked in a running Obsidian via the
 `obsidian` CLI — do not call a UI change verified on `npm test` alone.
 
-The `/Users/gris/joao` vault has `main.js`/`manifest.json`/`styles.css` symlinked to
-this repo, so a build is immediately live there; the `psicologia` vault holds copies
-and is not a dev target.
+**No vault is linked to this repo.** Test vaults run whatever the Obsidian community
+browser installs, so a local build reaches none of them and `plugin:reload` reloads the
+*released* build rather than the working tree. Editing here and re-running the live checks
+below without linking first silently tests the wrong code.
+
+To develop against a vault, link the build into it, and remove the link when done so the
+vault goes back to the released build:
 
 ```bash
+P="<vault>/.obsidian/plugins/study-pdf"
+mkdir -p "$P" && for f in main.js manifest.json styles.css; do ln -sf "$PWD/$f" "$P/$f"; done
 npm run build && obsidian plugin:reload id=study-pdf
 ```
 
