@@ -3,86 +3,23 @@
 // (recovered by matching the annotation's QuadPoints against the page's text
 // items), the note if any, and the page number. Clicking a row jumps there.
 //
-// Reads everything from the viewer's LIVE pdf.js document: no file re-parse,
-// and no need to bundle our own copy of pdf.js.
+// UI glue only: the reading of the live pdf.js document lives in
+// pdf-highlights.ts and the Markdown shapes in highlight-export.ts, both shared
+// with the "Export highlights to note" command.
 import { Modal, Notice, setIcon, setTooltip, type App } from 'obsidian';
 import type { ActivePdfView } from '../obsidian-pdf-internals';
-import { quadPointsToRects, extractQuote, type PdfJsTextItem } from '../pdf-text-extraction';
 import { getStoredQuotes } from '../annotate';
-
-interface HighlightEntry {
-	pageNumber: number;
-	/** PDF-space top of the first quad; used to sort entries in reading order. */
-	top: number;
-	colorCss: string;
-	quote: string;
-	note: string | null;
-	/** pdf.js annotation id (e.g. "40R") -- the same id Obsidian's own
-	 * `#page=N&annotation=ID` deep links target. */
-	annotationId: string | null;
-}
-
-// Minimal local shapes for the slice of pdf.js's live, untyped document we
-// actually read -- same approach as PdfViewportLike in geometry.ts: capture
-// only what we use, rather than depending on pdfjs-dist's real (and
-// version-specific) types for this glue code.
-interface PdfJsAnnotation {
-	subtype?: string;
-	quadPoints?: unknown;
-	color?: number[];
-	contentsObj?: { str?: string };
-	id?: string;
-}
-
-interface PdfJsPage {
-	getAnnotations(): Promise<PdfJsAnnotation[]>;
-	getTextContent(): Promise<{ items: PdfJsTextItem[] }>;
-}
-
-interface PdfJsDocument {
-	numPages: number;
-	getPage(pageNumber: number): Promise<PdfJsPage>;
-}
-
-async function collectHighlights(
-	pdfjsDoc: PdfJsDocument,
-	storedQuotes: Map<number, (string | null)[]>,
-): Promise<HighlightEntry[]> {
-	const entries: HighlightEntry[] = [];
-	for (let pageNumber = 1; pageNumber <= pdfjsDoc.numPages; pageNumber++) {
-		const page = await pdfjsDoc.getPage(pageNumber);
-		const annotations = await page.getAnnotations();
-		const highlights = annotations.filter((a) => a.subtype === 'Highlight');
-		if (highlights.length === 0) continue;
-
-		const textContent = await page.getTextContent();
-		// 0-based to match getStoredQuotes' keys; order matches its own
-		// per-page Highlight-only array (see that function's doc comment).
-		const pageStoredQuotes = storedQuotes.get(pageNumber - 1);
-		highlights.forEach((annotation, indexOnPage) => {
-			const rects = quadPointsToRects(annotation.quadPoints);
-			const [r, g, b] = annotation.color ?? [255, 255, 0];
-			entries.push({
-				pageNumber,
-				top: rects[0]?.top ?? 0,
-				colorCss: `rgb(${r}, ${g}, ${b})`,
-				quote: pageStoredQuotes?.[indexOnPage] || extractQuote(rects, textContent.items),
-				note: annotation.contentsObj?.str?.trim() || null,
-				annotationId: annotation.id ?? null,
-			});
-		});
-	}
-	// Reading order: page ascending, then top-of-page first (PDF y grows upward).
-	entries.sort((a, b) => a.pageNumber - b.pageNumber || b.top - a.top);
-	return entries;
-}
+import { collectHighlights, type HighlightEntry, type PdfJsDocument } from '../pdf-highlights';
+import { buildEntryLink, formatQuoteBlock } from '../highlight-export';
 
 export class HighlightListModal extends Modal {
 	private readonly pdfView: ActivePdfView;
+	private readonly onExport: () => Promise<void>;
 
-	constructor(app: App, pdfView: ActivePdfView) {
+	constructor(app: App, pdfView: ActivePdfView, onExport: () => Promise<void>) {
 		super(app);
 		this.pdfView = pdfView;
+		this.onExport = onExport;
 	}
 
 	async onOpen() {
@@ -112,25 +49,15 @@ export class HighlightListModal extends Modal {
 	/** Markdown where the quoted text itself IS the deep link: clicking it in a
 	 * note reopens the PDF at this exact annotation. Note follows, if any. */
 	private formatEntryAsLink(entry: HighlightEntry): string {
-		const subpath = entry.annotationId
-			? `#page=${entry.pageNumber}&annotation=${entry.annotationId}`
-			: `#page=${entry.pageNumber}`;
-		const link = this.app.fileManager.generateMarkdownLink(
-			this.pdfView.file,
-			'',
-			subpath,
-			entry.quote || `p. ${entry.pageNumber}`,
+		const link = buildEntryLink(entry, (subpath, alias) =>
+			this.app.fileManager.generateMarkdownLink(this.pdfView.file, '', subpath, alias),
 		);
-		const lines = [`> ${link}`];
-		if (entry.note) lines.push('', entry.note);
-		return lines.join('\n');
+		return formatQuoteBlock(link, entry.note);
 	}
 
 	/** Plain Markdown: just the quoted text and the note, no link. */
 	private formatEntryText(entry: HighlightEntry): string {
-		const lines = [`> ${entry.quote || '(no text)'}`];
-		if (entry.note) lines.push('', entry.note);
-		return lines.join('\n');
+		return formatQuoteBlock(entry.quote || '(no text)', entry.note);
 	}
 
 	private render(entries: HighlightEntry[]) {
@@ -157,6 +84,16 @@ export class HighlightListModal extends Modal {
 				entries.map((e) => this.formatEntryText(e)).join('\n\n'),
 				`${entries.length} highlights`,
 			);
+		});
+
+		// Last, not first: this one writes a file, so it shouldn't sit where the
+		// copy buttons have trained the user's click to land. Closing first keeps
+		// the modal from covering the note when a new one opens in a tab.
+		const exportToNote = toolbar.createEl('button', { text: 'Export to note' });
+		setTooltip(exportToNote, 'Write these highlights into a note beside the PDF');
+		exportToNote.addEventListener('click', () => {
+			this.close();
+			void this.onExport();
 		});
 
 		for (const entry of entries) {

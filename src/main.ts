@@ -1,4 +1,4 @@
-import { Notice, Platform, Plugin, setIcon, setTooltip } from 'obsidian';
+import { Notice, Platform, Plugin, TFile, setIcon, setTooltip } from 'obsidian';
 import {
 	getActivePdfView,
 	getAllPdfViews,
@@ -28,9 +28,17 @@ import {
 	buildHighlightIndex,
 	findHighlightInIndex,
 	setHighlightNoteAt,
+	getStoredQuotes,
 	type HighlightIndex,
 	type RgbColor,
 } from './annotate';
+import { collectHighlights, type PdfJsDocument } from './pdf-highlights';
+import {
+	buildEntryLink,
+	exportNotePath,
+	formatExportBody,
+	mergeExportedNote,
+} from './highlight-export';
 import { normalizeQuote } from './pdf-text-extraction';
 import {
 	DEFAULT_SETTINGS,
@@ -314,7 +322,22 @@ export default class PdfHighlighterPlugin extends Plugin {
 			checkCallback: (checking) => {
 				const pdfView = getActivePdfView(this.app);
 				if (!pdfView) return false;
-				if (!checking) new HighlightListModal(this.app, pdfView).open();
+				if (!checking) {
+					new HighlightListModal(this.app, pdfView, () =>
+						this.exportHighlightsToNote(pdfView),
+					).open();
+				}
+				return true;
+			},
+		});
+
+		this.addCommand({
+			id: 'export-highlights',
+			name: 'Export highlights to note',
+			checkCallback: (checking) => {
+				const pdfView = getActivePdfView(this.app);
+				if (!pdfView) return false;
+				if (!checking) void this.exportHighlightsToNote(pdfView);
 				return true;
 			},
 		});
@@ -373,7 +396,11 @@ export default class PdfHighlighterPlugin extends Plugin {
 			const button = toolbarRight.createDiv('clickable-icon study-pdf-toolbar-button');
 			setIcon(button, 'list-checks');
 			setTooltip(button, 'Show all highlights and notes');
-			button.addEventListener('click', () => new HighlightListModal(this.app, pdfView).open());
+			button.addEventListener('click', () =>
+				new HighlightListModal(this.app, pdfView, () =>
+					this.exportHighlightsToNote(pdfView),
+				).open(),
+			);
 		}
 	}
 
@@ -711,6 +738,73 @@ export default class PdfHighlighterPlugin extends Plugin {
 			);
 		} catch {
 			// Silent: this is a passive background check, not an explicit user action.
+		}
+	}
+
+	/** Writes (or refreshes) the sibling "<PDF> (highlights).md" note.
+	 *
+	 * The whole managed block is regenerated rather than diffed per annotation
+	 * id: pdf-lib re-serializes the entire document on every write, and while
+	 * measurement showed untouched annotations keeping their object numbers
+	 * through one, that is a property of pdf-lib's writer rather than anything
+	 * this plugin controls. Regenerating costs nothing and can't preserve a
+	 * stale link. */
+	private async exportHighlightsToNote(pdfView: ActivePdfView) {
+		try {
+			// getPdfJsDocument() is genuinely `any` (the live, untyped pdf.js
+			// object) -- an explicit cast, not a type annotation, is what actually
+			// tells the type checker this any is intentional here.
+			const pdfjsDoc = pdfView.getPdfJsDocument() as PdfJsDocument;
+			const fileBytes = new Uint8Array(await this.app.vault.readBinary(pdfView.file));
+			const entries = await collectHighlights(pdfjsDoc, await getStoredQuotes(fileBytes));
+
+			const notePath = exportNotePath(pdfView.file.parent?.path, pdfView.file.basename);
+
+			// Nothing to export and nothing to refresh: don't leave a note behind
+			// for a PDF the user has never highlighted (this command is one
+			// mis-click away in the palette).
+			const existingFile = this.app.vault.getAbstractFileByPath(notePath);
+			if (entries.length === 0 && !existingFile) {
+				new Notice('Study PDF: no highlights in this PDF yet.');
+				return;
+			}
+			if (existingFile && !(existingFile instanceof TFile)) {
+				new Notice(`Study PDF: "${notePath}" is a folder, not a note.`);
+				return;
+			}
+
+			// Links are generated relative to the note that will hold them, so
+			// they resolve whichever link style the vault is set to. The source
+			// link omits the subpath argument entirely rather than passing '',
+			// which would render a dangling '#'.
+			const link = (subpath: string, alias?: string) =>
+				this.app.fileManager.generateMarkdownLink(pdfView.file, notePath, subpath, alias);
+			const body = formatExportBody(
+				entries.map((entry) => ({
+					...entry,
+					link: buildEntryLink(entry, link),
+				})),
+				{
+					sourceLink: this.app.fileManager.generateMarkdownLink(pdfView.file, notePath),
+					palette: this.settings.colors,
+				},
+			);
+
+			const existing = existingFile ? await this.app.vault.read(existingFile) : null;
+			const merged = mergeExportedNote(existing, body);
+			if (existingFile) {
+				// Skipping an identical write keeps re-exports from touching mtime
+				// and waking the user's sync for nothing.
+				if (merged !== existing) await this.app.vault.modify(existingFile, merged);
+			} else {
+				const created = await this.app.vault.create(notePath, merged);
+				await this.app.workspace.getLeaf('tab').openFile(created);
+			}
+			new Notice(
+				`Exported ${entries.length} highlight${entries.length === 1 ? '' : 's'} to ${notePath}.`,
+			);
+		} catch (err) {
+			new Notice(`Study PDF: could not export highlights — ${(err as Error).message}`);
 		}
 	}
 

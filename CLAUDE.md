@@ -50,6 +50,20 @@ obsidian eval code='app.workspace.getLeavesOfType("pdf").length'
 obsidian dev:screenshot path=/tmp/check.png
 ```
 
+The CLI's `vault=<name>` option is **silently ignored**: it lists every known vault,
+but every command runs against whichever vault is connected to `~/.obsidian-cli.sock`
+— `obsidian eval vault=X code='app.vault.getName()'` returns that vault's name for
+any `X`, and `obsidian files vault=X` returns identical listings for two different
+vaults. Check which vault you actually reached before trusting a live result, and if
+it's the wrong one, there is no CLI way to switch (window focus can't be scripted
+without accessibility permission).
+
+`eval`, `vault` and the `dev:*` commands also **disappear when no community plugin is
+enabled** in the connected vault — they're listed in `--help` but every call answers
+`Command "eval" not found. It may require a plugin to be enabled.` Re-enabling any
+community plugin (`obsidian plugin:enable id=study-pdf`) brings them straight back, so
+disabling the plugin at the end of a session is what takes the debugging tools with it.
+
 ## Architecture
 
 **Internals chokepoint.** `src/obsidian-pdf-internals.ts` is the only module allowed

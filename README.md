@@ -29,6 +29,11 @@ side.
   in the document (color, recovered quoted text, note, page), with click-to-jump and
   copy buttons — as Obsidian annotation deep links (`#page=N&annotation=ID`) or as
   plain Markdown.
+- **Export to a note**: *Export highlights to note* writes every highlight into
+  `<PDF name> (highlights).md` beside the PDF — grouped by page, colour-swatched,
+  each quote a deep link back to its annotation, with your note beneath it. It's a
+  sync, not a dump: only the block between the `%%study-pdf:begin%%` /
+  `%%study-pdf:end%%` markers is rewritten, so anything you add around it survives.
 - **Settings**: the palette is fixed, but you pick which color is the default (the
   one the *Highlight selection* command uses, and the first dot in the popup) by
   starring it in the plugin's settings tab.
@@ -111,6 +116,10 @@ warnings in `eslint.config.mjs`, with the reasoning next to each call site in
 - `src/pdf-text-extraction.ts` — pure text recovery: maps a highlight's quads back
   onto a page's text items to reconstruct the quoted text when a highlight has no
   quote stored (highlights made in other readers, or by older plugin versions).
+- `src/pdf-highlights.ts` — reads every highlight out of the viewer's live PDF.js
+  document (no file re-parse); shared by the list modal and the note export.
+- `src/highlight-export.ts` — pure Markdown formatting for the exported note and
+  the modal's copy buttons, including the managed-block merge.
 - `src/obsidian-pdf-internals.ts` — the ONLY module touching undocumented
   Obsidian/PDF.js internals (viewer access, native popup suppression).
 - `src/ui/` — icon popup, note editor, reload curtain, highlights list modal.
