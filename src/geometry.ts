@@ -146,3 +146,35 @@ export function selectionRectsToQuadPoints(
 
 	return { quadPoints, box: unionPdfBoxes(boxes) };
 }
+
+export interface ViewportPoint {
+	x: number;
+	y: number;
+}
+
+export interface ViewportRect {
+	left: number;
+	top: number;
+	right: number;
+	bottom: number;
+}
+
+/** Whether a press landed on the current text selection.
+ *
+ * Used to tell "the user finished making this selection" from "the user tapped
+ * somewhere else and wants it gone". iOS does not collapse a selection when you
+ * tap away from it -- the selection, its native handles, and our popup all just
+ * stay -- so the plugin has to make that call itself from the press position.
+ *
+ * `slopPx` covers releasing a drag a pixel past the last glyph, and the gaps
+ * between line boxes: without it, ending a selection in the leading between two
+ * lines would read as a press outside it and throw the selection away. */
+export function pointWithinRects(point: ViewportPoint, rects: ViewportRect[], slopPx = 0): boolean {
+	return rects.some(
+		(rect) =>
+			point.x >= rect.left - slopPx &&
+			point.x <= rect.right + slopPx &&
+			point.y >= rect.top - slopPx &&
+			point.y <= rect.bottom + slopPx,
+	);
+}

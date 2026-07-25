@@ -122,3 +122,9 @@ warnings in `eslint.config.mjs`, with the reasoning next to each call site in
 - Scanned PDFs without a text layer can't be text-highlighted.
 - Annotation deep links can break for a highlight if the file is later re-saved
   (object numbers may shift); the page part of the link keeps working.
+- On iOS, pinch-zooming a PDF flickers each page and occasionally lands on a
+  different page. This is Obsidian's PDF viewer, not this plugin — it happens
+  with the plugin disabled too.
+- On iOS, the text you are selecting looks fainter than elsewhere in Obsidian:
+  the system draws its own selection tint over the PDF text layer and ignores
+  any colour a plugin or theme sets. The saved highlight is unaffected.

@@ -292,6 +292,57 @@ export async function inspectHighlightAt(
 	return null;
 }
 
+/** Every /Highlight annotation on a page, in /Annots order, reduced to just
+ * what a click lookup needs. */
+export interface IndexedHighlight {
+	/** The annotation's /Rect, the same box isOverlappingHighlight compares. */
+	box: PdfBox;
+	note: string | null;
+}
+
+/** All highlights in the document, keyed by 0-based page index. */
+export type HighlightIndex = Map<number, IndexedHighlight[]>;
+
+/** Parses the document once and reduces it to the boxes-and-notes a click
+ * lookup needs, so repeated clicks don't each re-read and re-parse the whole
+ * file (a real stall on a large PDF, on the tap path where it is most visible).
+ *
+ * Deliberately built from exactly what inspectHighlightAt inspects -- the /Rect
+ * and /Contents of each /Highlight, in /Annots order -- so a lookup against the
+ * index and a lookup against the bytes cannot disagree. tests/annotate.test.ts
+ * pins that equivalence. */
+export async function buildHighlightIndex(pdfBytes: Uint8Array): Promise<HighlightIndex> {
+	const pdfDoc = await loadPdfDoc(pdfBytes);
+	const context = pdfDoc.context;
+	const index: HighlightIndex = new Map();
+
+	pdfDoc.getPages().forEach((page, pageIndex) => {
+		const annots = page.node.lookupMaybe(PDFName.of('Annots'), PDFArray);
+		if (!annots) return;
+
+		const found: IndexedHighlight[] = [];
+		for (let i = 0; i < annots.size(); i++) {
+			const dict = context.lookup(annots.get(i), PDFDict);
+			if (dict.get(PDFName.of('Subtype'))?.toString() !== '/Highlight') continue;
+			const rectArray = context.lookupMaybe(dict.get(PDFName.of('Rect')), PDFArray);
+			if (!rectArray) continue;
+			const [left, bottom, right, top] = rectArray.asArray().map((o) => (o as PDFNumber).asNumber());
+			found.push({ box: { left: left!, bottom: bottom!, right: right!, top: top! }, note: readNote(dict) });
+		}
+		if (found.length > 0) index.set(pageIndex, found);
+	});
+
+	return index;
+}
+
+/** The indexed equivalent of inspectHighlightAt: first highlight on the page
+ * whose box overlaps, or null. */
+export function findHighlightInIndex(index: HighlightIndex, options: RemoveHighlightsOptions): HighlightInfo | null {
+	const { pageIndex, box } = options;
+	const found = index.get(pageIndex)?.find((highlight) => boxesOverlap(highlight.box, box));
+	return found ? { note: found.note } : null;
+}
+
 /** Read-only check: is there a /Highlight annotation on the page overlapping
  * the given box? */
 export async function hasHighlightAt(pdfBytes: Uint8Array, options: RemoveHighlightsOptions): Promise<boolean> {

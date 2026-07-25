@@ -17,7 +17,9 @@ npx vitest run -t 'quadPoints'         # one test by name
 npm run lint                           # eslint-plugin-obsidianmd; must exit clean
 ```
 
-`main.js` at the repo root is a committed esbuild artifact — never hand-edit it.
+`main.js` at the repo root is a build artifact and is **gitignored** — CI rebuilds it for
+each release. Never hand-edit it, and don't expect it in a diff; the dev vaults consume the
+local build directly (symlinked for `joao`, copied for `psicologia`).
 
 ## Testing in a live Obsidian
 
@@ -85,6 +87,72 @@ oracle instead of a reimplemented transform.
   prototype patch of `renderAnnotationPopup` (restored on unload), not event suppression.
 - Use `node.instanceOf(HTMLElement)`, not `instanceof` — popout windows have a separate
   element realm.
+- **iOS ignores `::selection` in the PDF text layer.** WKWebView paints its own faint
+  native selection tint there and honours no `::selection` background at all — not the
+  plugin's rule, not Obsidian's, not pdf.js's. Confirmed on-device: a deliberately garish
+  `.textLayer×4 ::selection { background: red }` at the highest specificity in the whole
+  cascade rendered red on desktop and stayed pale blue on an iPhone, with an on-device dump
+  proving that exact rule was loaded. Don't "fix" the washed-out mobile selection with
+  specificity bumps or `!important` — no CSS reaches it. This is why `selection-overlay.ts`
+  exists: on iOS only, the selection is painted as real elements (what CodeMirror does for
+  the editor, which is why notes look stronger than PDFs there). The committed `/Highlight`
+  annotation renders correctly regardless — only the pre-commit selection is affected.
+- **While a native iOS selection is up, WKWebView swallows a tap's `pointerdown` and
+  delivers only `pointerup`.** Anything that measures a tap must fall back to the
+  `pointerup` coordinates (`??=`, so a real `pointerdown` still wins where both arrive —
+  a long-press releases well away from where it started, often outside the selection it
+  just created). Confirmed from an on-device log, not inferred.
+- **iOS does not collapse a selection when you tap away from it.** The selection, its
+  native handles, and any popup all stay. `selection !== null` is therefore not evidence
+  the user still wants one; the plugin decides from the press position via
+  `pointWithinRects` (geometry.ts) and drops the selection itself.
+- Four separate fixes for the mobile popup bugs were each verified against a *desktop
+  simulation* of what iOS was assumed to be doing, and each simulation was wrong in a
+  different way. What finally worked was a temporary ring buffer logging
+  pointer/selection events to a vault note, dumped from the phone via a debug command.
+  For any iOS-only behaviour, record what the device actually does before theorising —
+  the round trip is cheaper than a confident wrong fix.
+- **Pinch-zoom flicker and page-jumping on iOS are not this plugin's.** Confirmed by the
+  cleanest possible control: with Study PDF fully disabled, an iPhone still flickers each
+  page blank while pdf.js re-rasterises at the new scale, and still sometimes lands on a
+  different page. Don't re-investigate from inside the plugin — it registers no zoom,
+  scale or resize listener at all, and the reload curtain only ever appears on writes.
+  (The multi-touch guard in the pointer handlers is still worth having: a pinch used to be
+  read as two taps, which re-parsed the whole PDF twice per gesture and could pop a spurious
+  popup. That is a real fix, but it is not a fix for the flicker.)
+- Touch taps reach `mousedown`/`mouseup` only as *compatibility* mouse events, which the
+  engine synthesizes after `touchend` and silently suppresses whenever the gesture wasn't a
+  clean tap (a few px of thumb travel, a long-press promoted to selection, a `preventDefault`
+  in the touch sequence). Anything that must respond to a tap listens on `pointerdown`/
+  `pointerup` *in addition to* the mouse events, filtered on `evt.pointerType !== 'mouse'`
+  — never as a replacement, since the desktop drag-selection path depends on the mouse pair.
+- **Do not ignore `pointercancel`** (an earlier version of this file said to, and it was
+  wrong). iOS fires it *instead of* `pointerup` whenever the compositor might want the
+  gesture, which inside a scrollable PDF is most touches — often after a pixel or two of
+  thumb travel with no scroll ever happening. Dropping them all makes tapping work only
+  sometimes; honouring them all turns every scroll and long-press into a tap. Judge the
+  cancelled touch on travel and duration instead (`tap-gesture.ts`), with generous slop:
+  a thumb drifts 6-8px, and too tight a threshold reinstates the bug.
+- A pinch is **two** pointers and each ends with its own `pointerup`, so anything treating
+  a `pointerup` as a tap fires twice per zoom. `activePointers`/`isMultiTouchGesture` in
+  `main.ts` latch on the second finger and hold until the last one lifts.
+- Both touch paths above are testable on the desktop dev vault without a phone — dispatch
+  synthetic `PointerEvent`s with `pointerType: 'touch'` at a real annotation's centre via
+  `obsidian eval` and assert on `.study-pdf-popup`. Stashing the change and re-running the
+  same dispatch is a cheap control for "does this actually fix it".
+- `app.emulateMobile(true)` does **not** verify `@media (pointer: coarse)` rules. It adds
+  Obsidian's `is-mobile` class, but the Electron window keeps a fine pointer, so
+  `matchMedia("(pointer: coarse)")` stays `false` and the rules never apply. To exercise
+  them on the desktop dev vault, flip the live rule's condition and measure real elements:
+
+  ```js
+  // obsidian eval — find the block, retarget it, measure, restore
+  for (const s of document.styleSheets) for (const r of s.cssRules)
+    if (r.type === 4 && r.conditionText?.includes('coarse')) r.media.mediaText = '(pointer: fine)';
+  ```
+
+  That covers sizing, but viewport-relative parts (`90vw` wrapping, `min(240px, 70vw)`)
+  resolve to their desktop branch and still need a narrow pane or a real device.
 
 ## Lint and release
 

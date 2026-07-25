@@ -7,6 +7,8 @@ import {
 	removeHighlightsAt,
 	hasHighlightAt,
 	inspectHighlightAt,
+	buildHighlightIndex,
+	findHighlightInIndex,
 	setHighlightNoteAt,
 	getStoredQuotes,
 } from '../src/annotate';
@@ -681,5 +683,122 @@ describe('highlight notes (annotation /Contents)', () => {
 		await expect(
 			hasHighlightAt(bytes, { pageIndex: 0, box: { left: 0, right: 10, top: 10, bottom: 0 } }),
 		).rejects.toThrow(/password/i);
+	});
+});
+
+describe('buildHighlightIndex / findHighlightInIndex', () => {
+	/** The index exists purely as a faster path to the same answer, so the
+	 * contract that matters is agreement with inspectHighlightAt -- not any
+	 * particular index shape. Swept over a grid rather than a few hand-picked
+	 * points so an off-by-one in the box comparison can't hide between samples. */
+	async function expectAgreementAcrossGrid(bytes: Uint8Array, pageCount = 1) {
+		const index = await buildHighlightIndex(bytes);
+		let sawHighlight = false;
+		let sawEmpty = false;
+		// Offset off the round numbers: a grid landing exactly on the highlight's
+		// edges samples only the boundary and can miss its interior entirely.
+		for (let pageIndex = 0; pageIndex < pageCount; pageIndex++) {
+			for (let x = 5; x <= 600; x += 15) {
+				for (let y = 5; y <= 800; y += 15) {
+					const box = { left: x, right: x, top: y, bottom: y };
+					const direct = await inspectHighlightAt(bytes, { pageIndex, box });
+					expect(findHighlightInIndex(index, { pageIndex, box })).toEqual(direct);
+					if (direct) sawHighlight = true;
+					else sawEmpty = true;
+				}
+			}
+		}
+		// Guards against a vacuous pass where the grid never touched a highlight.
+		expect(sawHighlight).toBe(true);
+		expect(sawEmpty).toBe(true);
+	}
+
+	it('agrees with inspectHighlightAt everywhere on a highlighted page', async () => {
+		const base = await makeFixturePdfBytes();
+		const box = { left: 10, right: 100, top: 220, bottom: 200 };
+		const quad = [box.left, box.top, box.right, box.top, box.left, box.bottom, box.right, box.bottom];
+		const bytes = await addHighlightAnnotation(base, { pageIndex: 0, quadPoints: quad, box, color: YELLOW });
+
+		await expectAgreementAcrossGrid(bytes);
+	});
+
+	it('agrees when a highlight carries a note', async () => {
+		const base = await makeFixturePdfBytes();
+		const box = { left: 10, right: 100, top: 220, bottom: 200 };
+		const quad = [box.left, box.top, box.right, box.top, box.left, box.bottom, box.right, box.bottom];
+		const highlighted = await addHighlightAnnotation(base, { pageIndex: 0, quadPoints: quad, box, color: YELLOW });
+		const withNote = await setHighlightNoteAt(highlighted, { pageIndex: 0, box: { left: 50, right: 50, top: 210, bottom: 210 }, note: 'hello' });
+
+		const point = { left: 50, right: 50, top: 210, bottom: 210 };
+		expect(findHighlightInIndex(await buildHighlightIndex(withNote.bytes), { pageIndex: 0, box: point })).toEqual({
+			note: 'hello',
+		});
+		await expectAgreementAcrossGrid(withNote.bytes);
+	});
+
+	it('returns null for a page with no highlights, like inspectHighlightAt', async () => {
+		const base = await makeFixturePdfBytes();
+		const index = await buildHighlightIndex(base);
+		const point = { left: 50, right: 50, top: 210, bottom: 210 };
+
+		expect(findHighlightInIndex(index, { pageIndex: 0, box: point })).toBeNull();
+		expect(await inspectHighlightAt(base, { pageIndex: 0, box: point })).toBeNull();
+	});
+
+	it('returns null for an out-of-range page instead of throwing', async () => {
+		const index = await buildHighlightIndex(await makeFixturePdfBytes());
+
+		expect(findHighlightInIndex(index, { pageIndex: 99, box: { left: 0, right: 0, top: 0, bottom: 0 } })).toBeNull();
+	});
+
+	it('ignores non-highlight annotations, like the direct lookup', async () => {
+		// A link annotation overlapping the probe point: neither path may report it.
+		const base = await makeFixturePdfBytes();
+		const doc = await PDFDocument.load(base);
+		const context = doc.context;
+		const linkDict = context.obj({
+			Type: 'Annot',
+			Subtype: 'Link',
+			Rect: [10, 130, 100, 220],
+			Border: [0, 0, 0],
+			A: { Type: 'Action', S: 'URI', URI: PDFString.of('https://example.com') },
+		});
+		doc.getPage(0).node.set(PDFName.of('Annots'), context.obj([context.register(linkDict)]));
+		const bytesWithLink = await doc.save();
+		const point = { left: 50, right: 50, top: 150, bottom: 150 };
+
+		expect(findHighlightInIndex(await buildHighlightIndex(bytesWithLink), { pageIndex: 0, box: point })).toBeNull();
+		expect(await inspectHighlightAt(bytesWithLink, { pageIndex: 0, box: point })).toBeNull();
+	});
+
+	it('agrees across every page of the complex fixture', async () => {
+		// Links, form fields and multiple pages -- the same document the
+		// round-trip safety tests use.
+		const base = await makeComplexFixturePdfBytes();
+		const box = { left: 40, right: 160, top: 400, bottom: 380 };
+		const quad = [box.left, box.top, box.right, box.top, box.left, box.bottom, box.right, box.bottom];
+		const bytes = await addHighlightAnnotation(base, { pageIndex: 1, quadPoints: quad, box, color: YELLOW });
+		const index = await buildHighlightIndex(bytes);
+
+		// Explicit hit at the highlight's centre: a grid coarse enough to keep this
+		// test fast steps straight over a 20pt-tall band, so the sweep below proves
+		// agreement but cannot prove the highlight was ever found.
+		const centre = { left: 100, right: 100, top: 390, bottom: 390 };
+		expect(await inspectHighlightAt(bytes, { pageIndex: 1, box: centre })).toEqual({ note: null });
+		expect(findHighlightInIndex(index, { pageIndex: 1, box: centre })).toEqual({ note: null });
+		// ...and the highlight must not bleed onto its neighbours.
+		expect(findHighlightInIndex(index, { pageIndex: 0, box: centre })).toBeNull();
+		expect(findHighlightInIndex(index, { pageIndex: 2, box: centre })).toBeNull();
+
+		for (let pageIndex = 0; pageIndex < COMPLEX_FIXTURE_PAGE_COUNT; pageIndex++) {
+			for (let x = 5; x <= 600; x += 25) {
+				for (let y = 5; y <= 800; y += 25) {
+					const probe = { left: x, right: x, top: y, bottom: y };
+					expect(findHighlightInIndex(index, { pageIndex, box: probe })).toEqual(
+						await inspectHighlightAt(bytes, { pageIndex, box: probe }),
+					);
+				}
+			}
+		}
 	});
 });

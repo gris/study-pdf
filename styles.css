@@ -18,6 +18,32 @@
 	background-color: var(--color-accent);
 }
 
+/* Mobile selection overlay (see src/ui/selection-overlay.ts). iOS honours no
+   ::selection property at all inside the PDF text layer -- confirmed on-device
+   with an opaque red background AND yellow glyphs at the highest specificity in
+   the cascade, neither of which rendered -- so the only way to show the user
+   what they've selected is to paint it ourselves, the way CodeMirror does for
+   the editor. multiply keeps the canvas text underneath readable instead of
+   burying it under an opaque block. */
+.study-pdf-selection-overlay {
+	position: fixed;
+	inset: 0;
+	/* Above the PDF canvas, below our own popup (--layer-menu) so the color
+	   dots are never tinted by it. */
+	z-index: calc(var(--layer-menu) - 1);
+	pointer-events: none;
+}
+
+.study-pdf-selection-rect {
+	position: fixed;
+	background-color: var(--color-accent);
+	/* Plain opacity rather than mix-blend-mode: the container above sets a
+	   z-index and so forms a stacking context, which would leave a blend mode
+	   compositing against the container instead of the page underneath. */
+	opacity: 0.4;
+	border-radius: 1px;
+}
+
 /* Compact icon popup shown over the PDF (color dots to highlight, trash to
    remove). Theme variables only -- no hardcoded colors -- so it stays readable
    in any light/dark theme, exactly like Obsidian's own menus. */
@@ -148,4 +174,48 @@
 
 .study-pdf-list-copy {
 	flex-shrink: 0;
+}
+
+/* Touch sizing. The popup's controls are ~14px dots inside mouse-sized padding,
+   which is well under a comfortable thumb target, and every one of them commits
+   a write to the .pdf behind the reload curtain -- a mis-tap costs a full
+   write + reload + undo. Grow the hit areas and the gaps between them under
+   coarse pointers only, so desktop rendering is untouched. Placed last so it
+   wins on cascade order without specificity tricks. */
+@media (pointer: coarse) {
+	.study-pdf-popup {
+		gap: var(--size-2-2);
+		padding: var(--size-2-2);
+	}
+
+	.study-pdf-popup-row {
+		gap: var(--size-2-2);
+		/* Six 44px targets plus gaps overflow a narrow split pane; reflow
+		   instead. positionPopup measures after attach, so a two-row popup is
+		   still clamped correctly. */
+		flex-wrap: wrap;
+		max-width: 90vw;
+	}
+
+	.study-pdf-popup .clickable-icon {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 44px;
+		min-height: 44px;
+	}
+
+	.study-pdf-color-dot {
+		width: 20px;
+		height: 20px;
+	}
+
+	.study-pdf-note-input {
+		width: min(240px, 70vw);
+		min-height: 80px;
+	}
+
+	.study-pdf-list-row {
+		padding: var(--size-4-3);
+	}
 }

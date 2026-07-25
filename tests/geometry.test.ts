@@ -5,6 +5,7 @@ import {
 	pdfBoxToQuadPoints,
 	selectionRectsToQuadPoints,
 	boxesOverlap,
+	pointWithinRects,
 	type PageLocalRect,
 	type PdfViewportLike,
 } from '../src/geometry';
@@ -170,5 +171,42 @@ describe('selectionRectsToQuadPoints', () => {
 		expect(adjusted.box.left).toBe(plain.box.left);
 		expect(adjusted.box.right).toBe(plain.box.right);
 		expect(adjusted.quadPoints).toEqual(pdfBoxToQuadPoints(adjusted.box));
+	});
+});
+
+describe('pointWithinRects', () => {
+	const rects = [
+		{ left: 100, top: 200, right: 300, bottom: 220 },
+		{ left: 100, top: 230, right: 250, bottom: 250 },
+	];
+
+	it('accepts a point inside a rect', () => {
+		expect(pointWithinRects({ x: 150, y: 210 }, rects)).toBe(true);
+	});
+
+	it('accepts a point inside the second rect', () => {
+		expect(pointWithinRects({ x: 120, y: 240 }, rects)).toBe(true);
+	});
+
+	it('rejects a point beyond every rect', () => {
+		expect(pointWithinRects({ x: 500, y: 210 }, rects)).toBe(false);
+	});
+
+	it('rejects a point in the gap between lines without slop', () => {
+		expect(pointWithinRects({ x: 150, y: 225 }, rects)).toBe(false);
+	});
+
+	it('accepts that same gap once slop covers the leading', () => {
+		// Releasing a drag between two line boxes must not read as "tapped away".
+		expect(pointWithinRects({ x: 150, y: 225 }, rects, 6)).toBe(true);
+	});
+
+	it('accepts a point just past a rect edge within slop', () => {
+		expect(pointWithinRects({ x: 304, y: 210 }, rects, 6)).toBe(true);
+		expect(pointWithinRects({ x: 310, y: 210 }, rects, 6)).toBe(false);
+	});
+
+	it('rejects everything when there is no selection', () => {
+		expect(pointWithinRects({ x: 150, y: 210 }, [])).toBe(false);
 	});
 });

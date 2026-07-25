@@ -1,4 +1,4 @@
-import { Notice, Plugin, setIcon, setTooltip } from 'obsidian';
+import { Notice, Platform, Plugin, setIcon, setTooltip } from 'obsidian';
 import {
 	getActivePdfView,
 	getAllPdfViews,
@@ -7,6 +7,9 @@ import {
 } from './obsidian-pdf-internals';
 import { showIconPopup, showNoteEditorPopup, type IconPopup, type PopupButton } from './ui/icon-popup';
 import { showReloadCurtain, type CurtainPaint } from './ui/reload-curtain';
+import { createSelectionOverlay, type SelectionOverlay } from './ui/selection-overlay';
+import { classifyPointerGesture } from './tap-gesture';
+import { shouldReplacePendingUpdate, type SelectionUpdateMode } from './selection-scheduler';
 import { HighlightListModal } from './ui/highlights-modal';
 import {
 	clientRectToPageLocal,
@@ -16,13 +19,16 @@ import {
 	HIGHLIGHT_EXPAND_BOTTOM,
 	type PageLocalRect,
 	type PdfBox,
+	pointWithinRects,
 	type PdfViewportLike,
 } from './geometry';
 import {
 	addHighlightAnnotation,
 	removeHighlightsAt,
-	inspectHighlightAt,
+	buildHighlightIndex,
+	findHighlightInIndex,
 	setHighlightNoteAt,
+	type HighlightIndex,
 	type RgbColor,
 } from './annotate';
 import { normalizeQuote } from './pdf-text-extraction';
@@ -33,6 +39,11 @@ import {
 	hexToRgbColor,
 	type PdfHighlighterSettings,
 } from './settings';
+
+/** How far from the selection a touch may land and still count as "on" it --
+ * covers the leading between line boxes and releasing a drag a hair past the
+ * last glyph. */
+const SELECTION_HIT_SLOP_PX = 6;
 
 interface SelectionContext {
 	pdfView: ActivePdfView;
@@ -54,7 +65,8 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 
 export default class PdfHighlighterPlugin extends Plugin {
 	settings: PdfHighlighterSettings = DEFAULT_SETTINGS;
-	/** Last mousedown position inside a rendered PDF page. Used both by "Remove
+	/** Last press position inside a rendered PDF page (mousedown, or pointerdown
+	 * for touch/pen -- see the pointerdown listener). Used both by "Remove
 	 * highlight at selection" and the click-to-remove menu, instead of
 	 * window.getSelection(): clicking directly on an existing highlight is
 	 * consumed by PDF.js's own annotation layer (it shows its own popup,
@@ -66,12 +78,66 @@ export default class PdfHighlighterPlugin extends Plugin {
 	 * elsewhere can close it and so we never show two at once. */
 	private activePopup: IconPopup | null = null;
 
-	/** Shared debounce for both the mouseup-triggered check and the
+	/** Shared debounce for both the mouseup/pointerup-triggered check and the
 	 * selectionchange-triggered one (see the 'selectionchange' listener in
-	 * onload): whichever fires last wins, so a normal desktop drag-then-release
-	 * coalesces into the single immediate mouseup call instead of an extra
-	 * rebuild ~200ms later. */
+	 * onload), so a normal desktop drag-then-release coalesces into the single
+	 * immediate mouseup call instead of an extra rebuild ~200ms later. Later
+	 * callers generally win, except that a 'full' can't be downgraded -- see
+	 * scheduleSelectionUpdate. */
 	private selectionUpdateTimer = 0;
+
+	/** Which check that timer is currently armed for, so a late low-priority one
+	 * can be refused rather than silently replacing it. */
+	private pendingUpdateMode: SelectionUpdateMode | null = null;
+
+	/** Non-null only on iOS, where WKWebView ignores every ::selection property
+	 * in the PDF text layer and paints a barely-visible system tint instead, so
+	 * the selection has to be drawn as real elements (see selection-overlay.ts).
+	 * Everywhere else ::selection works and this stays null -- painting both
+	 * would double-tint the selection. */
+	private selectionOverlay: SelectionOverlay | null = null;
+
+	/** Where and when the current touch/pen press started, so a `pointercancel`
+	 * can be judged as a tap or a gesture (see the pointercancel listener). */
+	private pendingPress: { x: number; y: number; at: number } | null = null;
+
+	/** Pointer ids currently down. A pinch is two of them, and each one still
+	 * ends with its own pointerup -- without this every zoom gesture would be
+	 * read as a tap and trigger a full check, which re-reads and re-parses the
+	 * whole PDF. On a large document that is a long main-thread block landing
+	 * exactly while pdf.js is re-rasterising and re-anchoring scroll position. */
+	private activePointers = new Set<number>();
+
+	/** Latched once a second finger lands, and only released when every finger
+	 * is up: the tail of a pinch must not be treated as a tap either. */
+	private isMultiTouchGesture = false;
+
+	/** Where the last touch/pen press landed, in viewport coordinates. Unlike
+	 * lastPdfClick this is kept even for presses outside the pages -- tapping the
+	 * grey margin is still the user saying "dismiss this".
+	 *
+	 * One-shot: consumed by the next 'full' check and cleared. A point left lying
+	 * around outlives the gesture that produced it and would later be read as a
+	 * press outside some unrelated selection, silently throwing that one away.
+	 *
+	 * Set from pointerdown when there is one, and otherwise from pointerup --
+	 * while a native iOS selection is up, WKWebView swallows the pointerdown of a
+	 * tap and delivers only the pointerup (confirmed from an on-device log), so
+	 * insisting on pointerdown means the dismissing tap is never measured at all.
+	 * pointerdown still wins where both arrive: a long-press that creates a
+	 * selection releases well away from where it started, and the release point
+	 * can fall outside the very selection it just made. */
+	private lastTouchPressPoint: { x: number; y: number } | null = null;
+
+	/** Parsed highlight positions for one file version, so tapping around a
+	 * document doesn't re-read and re-parse the whole PDF on every tap -- a real
+	 * stall on a large one, right on the touch path.
+	 *
+	 * Keyed by path + mtime + size, so any edit (ours or another app's) misses
+	 * and re-reads. Only ever feeds the passive "is there a highlight here?"
+	 * lookup; every mutation still reads the file fresh, since a stale index
+	 * there could write against bytes that no longer exist. */
+	private highlightIndex: { key: string; index: HighlightIndex } | null = null;
 
 	async onload() {
 		await this.loadSettings();
@@ -95,12 +161,10 @@ export default class PdfHighlighterPlugin extends Plugin {
 		this.registerEvent(this.app.workspace.on('layout-change', () => this.ensureToolbarButtons()));
 
 		this.registerDomEvent(document, 'mousedown', (evt) => {
-			if (this.isInsideActivePopup(evt.target)) return;
-			const pdfView = getActivePdfView(this.app);
-			if (!pdfView || !(evt.target instanceof Node)) return;
-			const pageIndex = pdfView.findPageIndexForNode(evt.target);
-			if (pageIndex === null) return;
-			this.lastPdfClick = { pageIndex, clientX: evt.clientX, clientY: evt.clientY };
+			// A mouse press means we are not mid-touch; drop any remembered touch
+			// point so it can't be read as "this click landed outside the selection".
+			this.lastTouchPressPoint = null;
+			this.recordPdfPress(evt);
 		});
 
 		this.registerDomEvent(document, 'mouseup', (evt) => {
@@ -109,6 +173,78 @@ export default class PdfHighlighterPlugin extends Plugin {
 			if (this.isInsideActivePopup(evt.target)) return;
 			// A selection isn't final the instant mouseup fires in every browser;
 			// yielding a tick first avoids reading a stale/incomplete selection.
+			this.scheduleSelectionUpdate(0, 'full');
+		});
+
+		// Touch taps reach the two listeners above only as *compatibility* mouse
+		// events, which the engine synthesizes after touchend and suppresses
+		// whenever it decides the gesture wasn't a clean tap -- a few pixels of
+		// thumb travel, a long-press promoted to a selection gesture, or a
+		// preventDefault anywhere in the touch sequence is enough. That is why
+		// tapping a highlight on a phone shows the note/trash popup only
+		// sometimes. Pointer events are dispatched for the real gesture rather
+		// than reconstructed from it, so they don't have that failure mode.
+		//
+		// Additive on purpose: mouse input keeps flowing through mousedown/mouseup
+		// (the desktop drag-selection path those feed is load-bearing -- see the
+		// selectionchange comment below), and only non-mouse pointers are handled
+		// here. A tap that *does* also produce compatibility mouse events just
+		// re-runs the same 'full' check, which last-wins onto one timer and
+		// re-shows the same popup rather than stacking a second one.
+		this.registerDomEvent(document, 'pointerdown', (evt) => {
+			if (evt.pointerType === 'mouse') return;
+			this.activePointers.add(evt.pointerId);
+			if (this.activePointers.size > 1) {
+				this.isMultiTouchGesture = true;
+				this.pendingPress = null;
+				return;
+			}
+			this.pendingPress = { x: evt.clientX, y: evt.clientY, at: performance.now() };
+			if (!this.isInsideActivePopup(evt.target)) {
+				this.lastTouchPressPoint = { x: evt.clientX, y: evt.clientY };
+			}
+			this.recordPdfPress(evt);
+		});
+
+		this.registerDomEvent(document, 'pointerup', (evt) => {
+			if (evt.pointerType === 'mouse') return;
+			this.pendingPress = null;
+			if (this.releasePointer(evt.pointerId)) return;
+			if (this.isInsideActivePopup(evt.target)) return;
+			// ??=, not =: keep the pointerdown point when one arrived.
+			this.lastTouchPressPoint ??= { x: evt.clientX, y: evt.clientY };
+			// A tap with no pointerdown never reached recordPdfPress either, so the
+			// remove-menu check below has no idea where it landed. Record it now.
+			if (this.lastPdfClick === null) this.recordPdfPress(evt);
+			// A real pointerup already means nothing took the gesture over, so no
+			// classification is needed here -- unlike pointercancel below.
+			this.scheduleSelectionUpdate(0, 'full');
+		});
+
+		// pointercancel is not "the user gave up". iOS fires it instead of
+		// pointerup whenever the compositor might want the gesture, which inside a
+		// scrollable PDF is most touches -- frequently after a pixel or two of
+		// thumb travel, with no scroll ever happening. Dropping all of them (the
+		// obvious reading) is why tapping a highlight still only worked sometimes
+		// after the pointerup fix; honouring all of them would turn every scroll
+		// and long-press into a tap. So a cancelled touch is judged on what it
+		// actually did -- see tap-gesture.ts.
+		this.registerDomEvent(document, 'pointercancel', (evt) => {
+			if (evt.pointerType === 'mouse') return;
+			const press = this.pendingPress;
+			this.pendingPress = null;
+			if (this.releasePointer(evt.pointerId)) return;
+			if (!press || this.isInsideActivePopup(evt.target)) return;
+
+			const verdict = classifyPointerGesture({
+				downX: press.x,
+				downY: press.y,
+				endX: evt.clientX,
+				endY: evt.clientY,
+				durationMs: performance.now() - press.at,
+			});
+			if (verdict !== 'tap') return;
+			this.lastTouchPressPoint ??= { x: evt.clientX, y: evt.clientY };
 			this.scheduleSelectionUpdate(0, 'full');
 		});
 		// Dismisses the popup once the page scrolls away underneath it -- except
@@ -121,6 +257,9 @@ export default class PdfHighlighterPlugin extends Plugin {
 			document,
 			'scroll',
 			() => {
+				// The overlay is positioned in viewport coordinates, so it has to
+				// follow the page even when the popup is being left alone.
+				this.refreshSelectionOverlay();
 				if (this.isInsideActivePopup(document.activeElement)) return;
 				this.hideActiveMenu();
 			},
@@ -136,10 +275,25 @@ export default class PdfHighlighterPlugin extends Plugin {
 		// (mouse drag included), so debouncing off it keeps the popup in sync
 		// with the selection as it's extended. Not mobile-only: this also runs
 		// (and gets exercised) during an ordinary desktop mouse-drag.
+		if (Platform.isIosApp) {
+			this.selectionOverlay = createSelectionOverlay(document);
+			this.register(() => {
+				this.selectionOverlay?.destroy();
+				this.selectionOverlay = null;
+			});
+		}
+
 		this.registerDomEvent(document, 'selectionchange', () => {
+			// Repainted immediately rather than on the 200ms debounce below: this
+			// is what the user watches while dragging the selection handles, and
+			// a fifth of a second of lag behind their thumb is very visible.
+			this.refreshSelectionOverlay();
 			this.scheduleSelectionUpdate(200, 'selection-only');
 		});
-		this.register(() => window.clearTimeout(this.selectionUpdateTimer));
+		this.register(() => {
+			window.clearTimeout(this.selectionUpdateTimer);
+			this.pendingUpdateMode = null;
+		});
 
 		this.addCommand({
 			id: 'highlight-selection',
@@ -174,6 +328,7 @@ export default class PdfHighlighterPlugin extends Plugin {
 				return true;
 			},
 		});
+
 	}
 
 	onunload() {
@@ -292,9 +447,15 @@ export default class PdfHighlighterPlugin extends Plugin {
 	/** Coalesces the mouseup-triggered ('full') and selectionchange-triggered
 	 * ('selection-only') checks onto one timer -- see selectionUpdateTimer's
 	 * doc comment. */
-	private scheduleSelectionUpdate(delayMs: number, mode: 'full' | 'selection-only') {
+	private scheduleSelectionUpdate(delayMs: number, mode: SelectionUpdateMode) {
+		// Not simply last-wins: a late 'selection-only' must not cancel a pending
+		// 'full', or the popup can never be dismissed. See selection-scheduler.ts.
+		if (!shouldReplacePendingUpdate(this.pendingUpdateMode, mode)) return;
+
 		window.clearTimeout(this.selectionUpdateTimer);
+		this.pendingUpdateMode = mode;
 		this.selectionUpdateTimer = window.setTimeout(() => {
+			this.pendingUpdateMode = null;
 			if (mode === 'full') void this.updateSelectionMenu();
 			else this.updateSelectionPopupForLiveSelection();
 		}, delayMs);
@@ -306,6 +467,119 @@ export default class PdfHighlighterPlugin extends Plugin {
 	 * selectionchange path, which -- unlike a mouseup -- can't tell whether "no
 	 * selection" means "check for a highlight to remove instead": a selection
 	 * merely collapsing isn't the same user action as a deliberate click. */
+	/** Records where a press landed inside a rendered PDF page, and — just as
+	 * importantly — forgets the previous one when it landed anywhere else.
+	 *
+	 * Without the forgetting, pressing outside the pages (the grey margin, the
+	 * toolbar, another pane) leaves a stale `lastPdfClick` pointing at whatever
+	 * highlight was pressed before, so the follow-up check hides the popup and
+	 * then immediately re-shows the identical popup in the identical place. To
+	 * the user the popup simply refuses to dismiss.
+	 *
+	 * Presses inside our own popup are exempt: its buttons act on that remembered
+	 * click, so tapping "remove" must not erase the thing it is about to remove. */
+	private recordPdfPress(evt: MouseEvent | PointerEvent) {
+		if (this.isInsideActivePopup(evt.target)) return;
+
+		const pdfView = getActivePdfView(this.app);
+		const pageIndex =
+			pdfView && evt.target instanceof Node ? pdfView.findPageIndexForNode(evt.target) : null;
+		if (pageIndex === null) {
+			this.lastPdfClick = null;
+			return;
+		}
+		this.lastPdfClick = { pageIndex, clientX: evt.clientX, clientY: evt.clientY };
+	}
+
+	/** The highlight index for the current file version, reading and parsing the
+	 * PDF only when the cached one is for a different version. */
+	private async getHighlightIndex(pdfView: ActivePdfView): Promise<HighlightIndex> {
+		const file = pdfView.file;
+		const key = `${file.path}:${file.stat.mtime}:${file.stat.size}`;
+		if (this.highlightIndex?.key === key) return this.highlightIndex.index;
+
+		const bytes = await this.app.vault.readBinary(file);
+		const index = await buildHighlightIndex(new Uint8Array(bytes));
+		this.highlightIndex = { key, index };
+		return index;
+	}
+
+	/** Drops the cached index after our own writes. The mtime+size key would
+	 * usually catch these anyway, but two saves inside the same millisecond that
+	 * happen to land on the same size would not -- and the cost of being wrong
+	 * here is a popup that lies about what is in the file. */
+	private invalidateHighlightIndex() {
+		this.highlightIndex = null;
+	}
+
+	/** Books a pointer as lifted. Returns true when this event belongs to a
+	 * multi-touch gesture and must not be treated as a tap.
+	 *
+	 * Note the ids are dropped defensively: iOS swallows the pointerdown of a tap
+	 * while a selection is up (see the pointerdown listener), so an id can be
+	 * absent here without anything being wrong. */
+	private releasePointer(pointerId: number): boolean {
+		this.activePointers.delete(pointerId);
+		if (!this.isMultiTouchGesture) return false;
+		// Stay latched until the last finger leaves, then swallow this one too.
+		if (this.activePointers.size === 0) this.isMultiTouchGesture = false;
+		return true;
+	}
+
+	/** True when the last touch/pen press landed away from the given selection.
+	 *
+	 * Mouse presses never qualify: desktop collapses a selection on click by
+	 * itself, so that path already works and has no reason to enter this logic.
+	 * A press *inside* the selection is how a long-press that just created one
+	 * arrives here — treating that as "tapped away" would throw away the
+	 * selection the moment the user made it. */
+	private touchPressLandedOutside(selectionCtx: SelectionContext): boolean {
+		const press = this.lastTouchPressPoint;
+		if (!press) return false;
+
+		const range = window.getSelection()?.getRangeAt(0);
+		if (!range) return false;
+		const rects = Array.from(range.getClientRects()).map((r) => ({
+			left: r.left,
+			top: r.top,
+			right: r.right,
+			bottom: r.bottom,
+		}));
+		const inside = pointWithinRects(press, rects, SELECTION_HIT_SLOP_PX);
+		return rects.length > 0 && !inside;
+	}
+
+	/** Repaints (or clears) the iOS selection overlay. No-op on every other
+	 * platform, where selectionOverlay is null and ::selection does the job. */
+	private refreshSelectionOverlay() {
+		const overlay = this.selectionOverlay;
+		if (!overlay) return;
+
+		const selection = window.getSelection();
+		if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+			overlay.update([]);
+			return;
+		}
+		const range = selection.getRangeAt(0);
+
+		// Selections elsewhere in Obsidian (a note in a split, the file list) must
+		// not get painted over -- ::selection already handles those correctly.
+		const pdfView = getActivePdfView(this.app);
+		if (!pdfView || pdfView.findPageIndexForNode(range.commonAncestorContainer) === null) {
+			overlay.update([]);
+			return;
+		}
+
+		overlay.update(
+			Array.from(range.getClientRects()).map((r) => ({
+				left: r.left,
+				top: r.top,
+				width: r.width,
+				height: r.height,
+			})),
+		);
+	}
+
 	private updateSelectionPopupForLiveSelection() {
 		const selectionCtx = this.trySelectionContext();
 		if (selectionCtx) this.showAddHighlightPopup(selectionCtx);
@@ -335,7 +609,24 @@ export default class PdfHighlighterPlugin extends Plugin {
 	 * real text selection, or (if there's no selection but a highlight exists
 	 * right where the user just clicked) the trash-icon "remove" popup instead. */
 	private async updateSelectionMenu() {
+		// Unconditional: if a selectionchange ever fails to arrive, this is the
+		// only place that notices the painted overlay no longer matches reality.
+		this.refreshSelectionOverlay();
+
 		const selectionCtx = this.trySelectionContext();
+		const pressLandedOutside = selectionCtx !== null && this.touchPressLandedOutside(selectionCtx);
+		this.lastTouchPressPoint = null; // one-shot, see the field's doc comment
+		if (selectionCtx && pressLandedOutside) {
+			// iOS keeps a selection alive when you tap away from it, so "there is
+			// still a selection" is not evidence the user still wants one. Drop it
+			// ourselves and carry on into the remove-menu check below, exactly as
+			// if the press had found no selection.
+			window.getSelection()?.removeAllRanges();
+			this.refreshSelectionOverlay();
+			this.hideActiveMenu();
+			await this.maybeShowRemoveMenu();
+			return;
+		}
 		if (selectionCtx) {
 			this.showAddHighlightPopup(selectionCtx);
 			return;
@@ -376,8 +667,7 @@ export default class PdfHighlighterPlugin extends Plugin {
 		if (!resolved) return;
 
 		try {
-			const existingBytes = await this.app.vault.readBinary(pdfView.file);
-			const info = await inspectHighlightAt(new Uint8Array(existingBytes), resolved);
+			const info = findHighlightInIndex(await this.getHighlightIndex(pdfView), resolved);
 			// The user may have clicked/selected something else while this async
 			// check was running -- only show the menu if that click is still current.
 			if (!info || this.lastPdfClick !== click) return;
@@ -477,6 +767,7 @@ export default class PdfHighlighterPlugin extends Plugin {
 			});
 			// Obsidian auto-reloads the PDF view on file modification (confirmed
 			// live) -- no explicit refresh needed; the curtain masks its flicker.
+			this.invalidateHighlightIndex();
 			await this.app.vault.modifyBinary(pdfView.file, toArrayBuffer(highlighted));
 		} catch (err) {
 			curtain?.cancel();
@@ -519,6 +810,7 @@ export default class PdfHighlighterPlugin extends Plugin {
 				new Notice('Study PDF: no highlight found where you clicked.');
 				return;
 			}
+			this.invalidateHighlightIndex();
 			await this.app.vault.modifyBinary(pdfView.file, toArrayBuffer(result.bytes));
 		} catch (err) {
 			curtain?.cancel();
@@ -544,6 +836,7 @@ export default class PdfHighlighterPlugin extends Plugin {
 				new Notice('Study PDF: no highlight found where you clicked.');
 				return;
 			}
+			this.invalidateHighlightIndex();
 			await this.app.vault.modifyBinary(pdfView.file, toArrayBuffer(result.bytes));
 		} catch (err) {
 			curtain?.cancel();
