@@ -2,7 +2,6 @@
 // process checks for (see https://github.com/obsidianmd/eslint-plugin) --
 // catches deprecated-API usage, DOM-helper preferences, unsafe `any` flow,
 // etc. locally instead of one review comment at a time.
-import tsparser from '@typescript-eslint/parser';
 import tseslint from 'typescript-eslint';
 import { defineConfig } from 'eslint/config';
 import obsidianmd from 'eslint-plugin-obsidianmd';
@@ -15,7 +14,7 @@ export default defineConfig([
 		files: ['src/**/*.ts'],
 		extends: [...tseslint.configs.recommendedTypeChecked, ...obsidianmd.configs.recommended],
 		languageOptions: {
-			parser: tsparser,
+			parser: tseslint.parser,
 			parserOptions: { project: './tsconfig.json' },
 		},
 	},
