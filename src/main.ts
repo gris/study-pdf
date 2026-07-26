@@ -348,7 +348,7 @@ export default class PdfHighlighterPlugin extends Plugin {
 
 		this.addCommand({
 			id: 'sync-flashcards',
-			name: 'Create flashcards from highlights with notes',
+			name: 'Sync flashcards from notes',
 			checkCallback: (checking) => {
 				const pdfView = getActivePdfView(this.app);
 				if (!pdfView) return false;

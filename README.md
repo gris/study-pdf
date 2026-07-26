@@ -34,10 +34,10 @@ side.
   each quote a deep link back to its annotation, with your note beneath it. It's a
   sync, not a dump: only the block between the `%%study-pdf:begin%%` /
   `%%study-pdf:end%%` markers is rewritten, so anything you add around it survives.
-- **Flashcards**: *Create flashcards from highlights with notes* writes
-  spaced-repetition cards into `<PDF name> (flashcards).md` — your note is the
-  question, the highlighted text and a deep link back are the answer. Only
-  highlights that carry a note become cards. The sync **converges**: run it again
+- **Flashcards**: *Sync flashcards from notes* writes spaced-repetition cards into
+  `<PDF name> (flashcards).md` — your note is the question, the highlighted text and
+  a deep link back are the answer. Only highlights that carry a note become cards.
+  The sync **converges**: run it again
   and the file only changes if your highlights did. Edit a note in the PDF and its
   card is rewritten in place; delete a highlight and its card moves to an
   `## Orphaned` section rather than disappearing (put the highlight back and the
@@ -142,8 +142,11 @@ warnings in `eslint.config.mjs`, with the reasoning next to each call site in
 
 - Password-protected PDFs (real open password) can't be modified.
 - Scanned PDFs without a text layer can't be text-highlighted.
-- Annotation deep links can break for a highlight if the file is later re-saved
-  (object numbers may shift); the page part of the link keeps working.
+- Annotation deep links (and the flashcard cards keyed on them) depend on the
+  annotation's object number. This plugin's own writes preserve them — measured
+  across adding, removing, and note-editing highlights on a real document — but
+  another tool re-saving the file may renumber, and then only the page part of
+  the link keeps working.
 - On iOS, pinch-zooming a PDF flickers each page and occasionally lands on a
   different page. This is Obsidian's PDF viewer, not this plugin — it happens
   with the plugin disabled too.
