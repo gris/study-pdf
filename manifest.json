@@ -3,7 +3,7 @@
 	"name": "Study PDF",
 	"version": "0.4.0",
 	"minAppVersion": "1.4.4",
-	"description": "Highlight text and add notes to PDFs, saved into the file itself so they work in any reader — with a built-in page to browse, jump to, and copy them all.",
+	"description": "Highlight text and add notes to PDFs, saved into the file itself so they work in any reader — then browse them all, export them to a note, or turn your notes into spaced-repetition flashcards.",
 	"author": "João Gris",
 	"authorUrl": "https://gris.dev",
 	"isDesktopOnly": false
