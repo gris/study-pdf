@@ -125,6 +125,32 @@ function expandPdfBoxVertically(box: PdfBox, topRatio: number, bottomRatio: numb
 	return { ...box, top: box.top + height * topRatio, bottom: box.bottom - height * bottomRatio };
 }
 
+/** Smallest rect dimension, in page-local CSS pixels, that counts as real text.
+ *
+ * Deliberately far below one pixel: these are pre-transform coordinates, so the
+ * threshold scales with the zoom, and a generous one would start eating real
+ * glyphs when zoomed out (a period or a footnote superscript is only a couple
+ * of points wide to begin with). The rects this exists to drop measure exactly
+ * 0 -- the worst real case observed was a 0.005pt sliver -- so there is no need
+ * to reach any higher. */
+const MIN_RECT_SIZE_PX = 0.05;
+
+/** Drops the empty rects a DOM selection hands back alongside the real ones --
+ * an empty text span, pdf.js's `endOfContent` node, a zero-height edge.
+ *
+ * They paint nothing, but they join the union that becomes the annotation's
+ * /Rect, and one collapsed rect at x=0 near the top of the page is enough to
+ * stretch that /Rect to the full page width and a few hundred points tall.
+ * pdf.js sizes the annotation layer's hit box from /Rect, so the highlight ends
+ * up with a hover/click target far larger than the text it covers (measured on
+ * real highlights: ~1008x460px boxes over two lines of text). */
+export function dropDegenerateRects(rects: PageLocalRect[]): PageLocalRect[] {
+	return rects.filter(
+		(rect) =>
+			Math.abs(rect.right - rect.left) >= MIN_RECT_SIZE_PX && Math.abs(rect.bottom - rect.top) >= MIN_RECT_SIZE_PX,
+	);
+}
+
 /** Turns a text selection's per-line rects (already page-local) into the QuadPoints
  * array for a single PDF annotation, plus the annotation's overall bounding box
  * (for its /Rect entry). One quad per rect -- a multi-line selection becomes a
@@ -137,11 +163,14 @@ export function selectionRectsToQuadPoints(
 	expandTop = 0,
 	expandBottom = 0,
 ): { quadPoints: number[]; box: PdfBox } {
-	if (rects.length === 0) {
+	const realRects = dropDegenerateRects(rects);
+	if (realRects.length === 0) {
 		throw new Error('selectionRectsToQuadPoints requires at least one rect');
 	}
 
-	const boxes = rects.map((rect) => expandPdfBoxVertically(domRectToPdfBox(rect, viewport), expandTop, expandBottom));
+	const boxes = realRects.map((rect) =>
+		expandPdfBoxVertically(domRectToPdfBox(rect, viewport), expandTop, expandBottom),
+	);
 	const quadPoints = boxes.flatMap((box) => pdfBoxToQuadPoints(box));
 
 	return { quadPoints, box: unionPdfBoxes(boxes) };

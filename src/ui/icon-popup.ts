@@ -3,7 +3,7 @@
 // CSS variables + the `clickable-icon` class (see styles.css), so it inherits
 // the active theme's colors -- the failure mode of the first custom popup
 // (hardcoded colors, unreadable in dark themes) can't recur.
-import { setIcon, setTooltip } from 'obsidian';
+import { Scope, setIcon, setTooltip, type App } from 'obsidian';
 
 export type PopupButton =
 	| { type: 'color'; hex: string; name: string; onClick: () => void }
@@ -78,6 +78,7 @@ export function showIconPopup(
  * save/cancel icons. Enter saves (Shift+Enter for a newline), Escape cancels.
  * No mousedown preventDefault here -- the textarea needs real focus/clicks. */
 export function showNoteEditorPopup(
+	app: App,
 	doc: Document,
 	position: { x: number; y: number },
 	options: { initial: string; onSave: (note: string) => void; onCancel: () => void },
@@ -112,12 +113,32 @@ export function showNoteEditorPopup(
 		}
 	});
 
+	// Obsidian's PDF view owns bare ArrowLeft/ArrowRight through its own Scope
+	// (previous/next page) and takes them regardless of what has focus, so
+	// pressing left or right inside this textarea turned the page instead of
+	// moving the caret. Verified on the live view: with a PDF leaf active, an
+	// ArrowLeft in a focused textarea arrives already defaultPrevented, from a
+	// listener above anything we can register -- so stopPropagation on the
+	// textarea cannot help, and only a keymap scope can.
+	//
+	// A scope pushed here sits below the view's, so it sees the key first;
+	// returning a non-false value means "handled, but don't preventDefault",
+	// which stops the view from paging and leaves the browser's own caret
+	// movement intact. (Returning false would suppress the caret too.) Only
+	// unmodified arrows are bound by the view, so Shift/Alt/Cmd combinations
+	// still reach the textarea untouched.
+	const scope = new Scope();
+	scope.register([], 'ArrowLeft', () => true);
+	scope.register([], 'ArrowRight', () => true);
+	app.keymap.pushScope(scope);
+
 	positionPopup(doc, el, position);
 	input.focus();
 
 	return {
 		el,
 		hide() {
+			app.keymap.popScope(scope);
 			el.remove();
 		},
 	};

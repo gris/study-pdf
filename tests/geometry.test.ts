@@ -136,6 +136,34 @@ describe('selectionRectsToQuadPoints', () => {
 		page = await loadFixturePage();
 	});
 
+	it('drops empty rects, so an oversized /Rect can never come out of a selection', () => {
+		const viewport = page.getViewport({ scale: 1, rotation: 0 }) as PdfViewportLike;
+		// A real pdf.js text-layer selection hands back collapsed rects alongside the
+		// real ones (an empty span, the endOfContent node). Measured in the user's
+		// vault: a zero-width rect at x=0, ~200pt above the highlighted text, which
+		// stretched every annotation's /Rect to the full page width and made its hit
+		// box hundreds of points tall.
+		const rects: PageLocalRect[] = [
+			{ left: 0, top: 5, right: 0, bottom: 15 },      // zero width, far above
+			{ left: 40, top: 200, right: 140, bottom: 220 }, // the real line
+			{ left: 90, top: 220, right: 90.004, bottom: 240 }, // sub-pixel sliver
+			{ left: 40, top: 240, right: 100, bottom: 240 }, // zero height
+		];
+
+		const result = selectionRectsToQuadPoints(rects, viewport);
+
+		expect(result.quadPoints).toHaveLength(8); // only the real line survives
+		expect(result.quadPoints).toEqual(pdfBoxToQuadPoints(domRectToPdfBox(rects[1]!, viewport)));
+		expect(result.box).toEqual(domRectToPdfBox(rects[1]!, viewport));
+	});
+
+	it('throws rather than writing an annotation when every rect is empty', () => {
+		const viewport = page.getViewport({ scale: 1, rotation: 0 }) as PdfViewportLike;
+		const rects: PageLocalRect[] = [{ left: 0, top: 5, right: 0, bottom: 15 }];
+
+		expect(() => selectionRectsToQuadPoints(rects, viewport)).toThrow(/at least one/);
+	});
+
 	it('emits one quad per rect (multi-line selection) and unions the bounding box', () => {
 		const viewport = page.getViewport({ scale: 1, rotation: 0 }) as PdfViewportLike;
 		// Two "lines" of a selection, stacked vertically on screen.

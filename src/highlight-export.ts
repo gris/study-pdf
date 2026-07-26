@@ -35,9 +35,17 @@ const SWATCH_BY_COLOR_NAME: Record<string, string> = {
  * together when the PDF is moved into a subject folder. `folderPath` is the
  * PDF's parent path -- Obsidian's vault root is '/', which must not become a
  * leading slash in a vault-relative path. */
-export function exportNotePath(folderPath: string | undefined, basename: string): string {
+export function siblingNotePath(
+	folderPath: string | undefined,
+	basename: string,
+	suffix: string,
+): string {
 	const folder = folderPath && folderPath !== '/' ? `${folderPath}/` : '';
-	return `${folder}${basename} (highlights).md`;
+	return `${folder}${basename} (${suffix}).md`;
+}
+
+export function exportNotePath(folderPath: string | undefined, basename: string): string {
+	return siblingNotePath(folderPath, basename, 'highlights');
 }
 
 /** Obsidian deep link subpath for one highlight. Annotation ids come from

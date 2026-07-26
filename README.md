@@ -34,6 +34,17 @@ side.
   each quote a deep link back to its annotation, with your note beneath it. It's a
   sync, not a dump: only the block between the `%%study-pdf:begin%%` /
   `%%study-pdf:end%%` markers is rewritten, so anything you add around it survives.
+- **Flashcards**: *Create flashcards from highlights with notes* writes
+  spaced-repetition cards into `<PDF name> (flashcards).md` — your note is the
+  question, the highlighted text and a deep link back are the answer. Only
+  highlights that carry a note become cards. The sync **converges**: run it again
+  and the file only changes if your highlights did. Edit a note in the PDF and its
+  card is rewritten in place; delete a highlight and its card moves to an
+  `## Orphaned` section rather than disappearing (put the highlight back and the
+  card returns to its page). Either way the card's review schedule travels with it
+  — [obsidian-spaced-repetition](https://github.com/st3v3nmw/obsidian-spaced-repetition)
+  stores that inline, on the line after the card, so nothing you've already studied
+  is reset. Anything you wrote in the file yourself is left where it is.
 - **Settings**: the palette is fixed, but you pick which color is the default (the
   one the *Highlight selection* command uses, and the first dot in the popup) by
   starring it in the plugin's settings tab.
@@ -71,7 +82,7 @@ plugin fails loudly with a clear message rather than misbehaving silently.
 npm install
 npm run dev     # esbuild watch mode
 npm run build   # typecheck + production build -> main.js
-npm test        # vitest — geometry/annotate/text-extraction unit + round-trip tests
+npm test        # vitest — unit tests for the pure modules + PDF round-trip tests
 npm run lint    # eslint-plugin-obsidianmd -- same checks the community-plugin review does
 ```
 
@@ -120,6 +131,8 @@ warnings in `eslint.config.mjs`, with the reasoning next to each call site in
   document (no file re-parse); shared by the list modal and the note export.
 - `src/highlight-export.ts` — pure Markdown formatting for the exported note and
   the modal's copy buttons, including the managed-block merge.
+- `src/flashcards.ts` — pure card formatting and the converging merge (update in
+  place, orphan rather than delete) that keeps spaced-repetition schedules intact.
 - `src/obsidian-pdf-internals.ts` — the ONLY module touching undocumented
   Obsidian/PDF.js internals (viewer access, native popup suppression).
 - `src/ui/` — icon popup, note editor, reload curtain, highlights list modal.

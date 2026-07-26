@@ -686,33 +686,33 @@ describe('highlight notes (annotation /Contents)', () => {
 	});
 });
 
-describe('buildHighlightIndex / findHighlightInIndex', () => {
-	/** The index exists purely as a faster path to the same answer, so the
-	 * contract that matters is agreement with inspectHighlightAt -- not any
-	 * particular index shape. Swept over a grid rather than a few hand-picked
-	 * points so an off-by-one in the box comparison can't hide between samples. */
-	async function expectAgreementAcrossGrid(bytes: Uint8Array, pageCount = 1) {
-		const index = await buildHighlightIndex(bytes);
-		let sawHighlight = false;
-		let sawEmpty = false;
-		// Offset off the round numbers: a grid landing exactly on the highlight's
-		// edges samples only the boundary and can miss its interior entirely.
-		for (let pageIndex = 0; pageIndex < pageCount; pageIndex++) {
-			for (let x = 5; x <= 600; x += 15) {
-				for (let y = 5; y <= 800; y += 15) {
-					const box = { left: x, right: x, top: y, bottom: y };
-					const direct = await inspectHighlightAt(bytes, { pageIndex, box });
-					expect(findHighlightInIndex(index, { pageIndex, box })).toEqual(direct);
-					if (direct) sawHighlight = true;
-					else sawEmpty = true;
-				}
+/** The index exists purely as a faster path to the same answer, so the
+ * contract that matters is agreement with inspectHighlightAt -- not any
+ * particular index shape. Swept over a grid rather than a few hand-picked
+ * points so an off-by-one in the box comparison can't hide between samples. */
+async function expectAgreementAcrossGrid(bytes: Uint8Array, pageCount = 1) {
+	const index = await buildHighlightIndex(bytes);
+	let sawHighlight = false;
+	let sawEmpty = false;
+	// Offset off the round numbers: a grid landing exactly on the highlight's
+	// edges samples only the boundary and can miss its interior entirely.
+	for (let pageIndex = 0; pageIndex < pageCount; pageIndex++) {
+		for (let x = 5; x <= 600; x += 15) {
+			for (let y = 5; y <= 800; y += 15) {
+				const box = { left: x, right: x, top: y, bottom: y };
+				const direct = await inspectHighlightAt(bytes, { pageIndex, box });
+				expect(findHighlightInIndex(index, { pageIndex, box })).toEqual(direct);
+				if (direct) sawHighlight = true;
+				else sawEmpty = true;
 			}
 		}
-		// Guards against a vacuous pass where the grid never touched a highlight.
-		expect(sawHighlight).toBe(true);
-		expect(sawEmpty).toBe(true);
 	}
+	// Guards against a vacuous pass where the grid never touched a highlight.
+	expect(sawHighlight).toBe(true);
+	expect(sawEmpty).toBe(true);
+}
 
+describe('buildHighlightIndex / findHighlightInIndex', () => {
 	it('agrees with inspectHighlightAt everywhere on a highlighted page', async () => {
 		const base = await makeFixturePdfBytes();
 		const box = { left: 10, right: 100, top: 220, bottom: 200 };
@@ -800,5 +800,107 @@ describe('buildHighlightIndex / findHighlightInIndex', () => {
 				}
 			}
 		}
+	});
+});
+
+describe('neighbouring highlights are told apart by their quads, not their /Rect', () => {
+	// A highlight that wraps across two lines has a /Rect spanning the whole
+	// column -- it is the union of its per-line quads, so it also covers the
+	// blank area to the right of its short last line. A second highlight
+	// starting there (the next sentence, same line) sits fully inside the
+	// first's /Rect while sharing none of its quads.
+	const WRAPPED = {
+		quadPoints: [
+			// line 1, full column width
+			50, 212, 350, 212, 50, 200, 350, 200,
+			// line 2, sentence ends a third of the way across
+			50, 192, 150, 192, 50, 180, 150, 180,
+		],
+		box: { left: 50, right: 350, top: 212, bottom: 180 },
+	};
+	const NEXT_SENTENCE = {
+		quadPoints: [200, 192, 300, 192, 200, 180, 300, 180],
+		box: { left: 200, right: 300, top: 192, bottom: 180 },
+	};
+	/** Inside WRAPPED's /Rect, but only on NEXT_SENTENCE's quad. */
+	const CLICK = { left: 250, right: 250, top: 186, bottom: 186 };
+
+	async function makeTwoHighlights() {
+		let bytes = await addHighlightAnnotation(await makeFixturePdfBytes(), {
+			pageIndex: 0,
+			...WRAPPED,
+			color: YELLOW,
+			quote: 'wrapped',
+		});
+		bytes = await addHighlightAnnotation(bytes, {
+			pageIndex: 0,
+			...NEXT_SENTENCE,
+			color: YELLOW,
+			quote: 'next sentence',
+		});
+		return bytes;
+	}
+
+	/** Every highlight's note, in /Annots order: [wrapped, nextSentence]. */
+	async function readNotes(bytes: Uint8Array): Promise<(string | null)[]> {
+		const index = await buildHighlightIndex(bytes);
+		return (index.get(0) ?? []).map((h) => h.note);
+	}
+
+	it('a note set by clicking one highlight does not land on its neighbour', async () => {
+		const bytes = await makeTwoHighlights();
+
+		const result = await setHighlightNoteAt(bytes, { pageIndex: 0, box: CLICK, note: 'about the next sentence' });
+
+		expect(result.updatedCount).toBe(1);
+		expect(await readNotes(result.bytes)).toEqual([null, 'about the next sentence']);
+	});
+
+	it('reads back the clicked highlight\'s own note, not the neighbour\'s', async () => {
+		let bytes = await makeTwoHighlights();
+		bytes = (await setHighlightNoteAt(bytes, {
+			pageIndex: 0,
+			box: { left: 60, right: 60, top: 206, bottom: 206 },
+			note: 'about the wrapped sentence',
+		})).bytes;
+		bytes = (await setHighlightNoteAt(bytes, { pageIndex: 0, box: CLICK, note: 'about the next sentence' })).bytes;
+
+		expect(await inspectHighlightAt(bytes, { pageIndex: 0, box: CLICK })).toEqual({ note: 'about the next sentence' });
+		expect(findHighlightInIndex(await buildHighlightIndex(bytes), { pageIndex: 0, box: CLICK })).toEqual({
+			note: 'about the next sentence',
+		});
+	});
+
+	it('removing the clicked highlight leaves its neighbour alone', async () => {
+		const bytes = await makeTwoHighlights();
+
+		const result = await removeHighlightsAt(bytes, { pageIndex: 0, box: CLICK });
+
+		expect(result.removedCount).toBe(1);
+		const quotes = await getStoredQuotes(result.bytes);
+		expect(quotes.get(0)).toEqual(['wrapped']);
+	});
+
+	it('still finds nothing in the blank gap the /Rect covers but no quad does', async () => {
+		const bytes = await makeTwoHighlights();
+		// Right of the wrapped highlight's short second line, left of where the
+		// next sentence starts: inside the /Rect, on no quad at all.
+		const gap = { left: 175, right: 175, top: 186, bottom: 186 };
+
+		expect(await inspectHighlightAt(bytes, { pageIndex: 0, box: gap })).toBeNull();
+		expect(await hasHighlightAt(bytes, { pageIndex: 0, box: gap })).toBe(false);
+	});
+
+	it('resolves identically through the index and through the bytes', async () => {
+		// The wrapped-highlight geometry is exactly where the two paths could
+		// disagree -- everywhere else a quad and its /Rect are the same box.
+		await expectAgreementAcrossGrid(await makeTwoHighlights());
+	});
+
+	it('a selection crossing both still removes both', async () => {
+		const bytes = await makeTwoHighlights();
+		const sweep = { left: 40, right: 360, top: 215, bottom: 178 };
+
+		expect((await removeHighlightsAt(bytes, { pageIndex: 0, box: sweep })).removedCount).toBe(2);
 	});
 });

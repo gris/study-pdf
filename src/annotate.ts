@@ -236,22 +236,96 @@ export async function addHighlightAnnotation(
 export interface RemoveHighlightsOptions {
 	/** 0-based page index. */
 	pageIndex: number;
-	/** Any existing /Highlight annotation whose Rect overlaps this box is removed.
+	/** Any existing /Highlight annotation painting over this box is removed.
 	 * Typically the box of the user's current text selection -- i.e. "remove
 	 * whatever highlight is under this selected text." */
 	box: PdfBox;
 }
 
-/** True if the given annotation ref is a /Highlight whose Rect overlaps box. */
-function isOverlappingHighlight(context: PDFContext, ref: ReturnType<PDFArray['get']>, box: PdfBox): boolean {
+/** A /Highlight annotation reduced to the geometry a lookup needs: its /Rect
+ * and the individual quads it actually paints. */
+export interface HighlightGeometry {
+	/** The annotation's /Rect -- the union of all quads. */
+	box: PdfBox;
+	/** One box per quad (one per highlighted line). Empty for a highlight with
+	 * no usable /QuadPoints, where /Rect is all we have to go on. */
+	quads: PdfBox[];
+}
+
+function numbersOf(array: PDFArray): number[] {
+	return array.asArray().map((o) => (o as PDFNumber).asNumber());
+}
+
+/** The geometry of a /Highlight annotation, or null if the ref isn't one (or
+ * has no /Rect). */
+function readHighlightGeometry(context: PDFContext, ref: ReturnType<PDFArray['get']>): HighlightGeometry | null {
 	const dict = context.lookup(ref, PDFDict);
-	if (dict.get(PDFName.of('Subtype'))?.toString() !== '/Highlight') return false;
+	if (dict.get(PDFName.of('Subtype'))?.toString() !== '/Highlight') return null;
 
 	const rectArray = context.lookupMaybe(dict.get(PDFName.of('Rect')), PDFArray);
-	if (!rectArray) return false;
+	if (!rectArray) return null;
+	const [left, bottom, right, top] = numbersOf(rectArray);
+	const box = { left: left!, bottom: bottom!, right: right!, top: top! };
 
-	const [left, bottom, right, top] = rectArray.asArray().map((o) => (o as PDFNumber).asNumber());
-	return boxesOverlap({ left: left!, bottom: bottom!, right: right!, top: top! }, box);
+	const quadArray = context.lookupMaybe(dict.get(PDFName.of('QuadPoints')), PDFArray);
+	const raw = quadArray ? numbersOf(quadArray) : [];
+	const quads: PdfBox[] = [];
+	// A malformed tail (length not a multiple of 8) is ignored rather than
+	// guessed at; a highlight left with no usable quads falls back to /Rect.
+	for (let i = 0; i + 8 <= raw.length; i += 8) {
+		const xs = [raw[i]!, raw[i + 2]!, raw[i + 4]!, raw[i + 6]!];
+		const ys = [raw[i + 1]!, raw[i + 3]!, raw[i + 5]!, raw[i + 7]!];
+		quads.push({ left: Math.min(...xs), right: Math.max(...xs), top: Math.max(...ys), bottom: Math.min(...ys) });
+	}
+
+	return { box, quads };
+}
+
+/** True if box overlaps the area the highlight actually paints.
+ *
+ * Deliberately *not* a plain /Rect test. A highlight that wraps across lines
+ * has a /Rect spanning the union of its lines, which also covers the blank
+ * area beside a short last line -- so a neighbouring highlight starting there
+ * (the next sentence, same line) sits entirely inside it. Matching on /Rect
+ * made a click on one neighbour resolve to the other: the popup showed the
+ * wrong note, and saving a note wrote it to both, which is what "two nearby
+ * highlights share a note" looked like from the outside. Quads carry the real
+ * per-line geometry, so they tell the two apart. */
+function highlightMatchesBox(geometry: HighlightGeometry, box: PdfBox): boolean {
+	if (geometry.quads.length === 0) return boxesOverlap(geometry.box, box);
+	return geometry.quads.some((quad) => boxesOverlap(quad, box));
+}
+
+/** Painted area of a highlight, used to break ties when a point falls on more
+ * than one (genuinely stacked highlights over the same words). The smallest
+ * one wins: it's the more specific target, and the one a user pointing at
+ * overlapping highlights means. */
+function paintedArea(geometry: HighlightGeometry): number {
+	const boxes = geometry.quads.length > 0 ? geometry.quads : [geometry.box];
+	return boxes.reduce((sum, b) => sum + Math.max(0, b.right - b.left) * Math.max(0, b.top - b.bottom), 0);
+}
+
+/** The single highlight a click resolves to: the smallest match, or null.
+ * Shared by every "which highlight is under this point" path so they cannot
+ * disagree about the answer. */
+function pickBestMatch<T extends { geometry: HighlightGeometry }>(candidates: T[], box: PdfBox): T | null {
+	let best: T | null = null;
+	let bestArea = Infinity;
+	for (const candidate of candidates) {
+		if (!highlightMatchesBox(candidate.geometry, box)) continue;
+		const area = paintedArea(candidate.geometry);
+		if (area < bestArea) {
+			best = candidate;
+			bestArea = area;
+		}
+	}
+	return best;
+}
+
+/** True if the given annotation ref is a /Highlight painting over box. */
+function isOverlappingHighlight(context: PDFContext, ref: ReturnType<PDFArray['get']>, box: PdfBox): boolean {
+	const geometry = readHighlightGeometry(context, ref);
+	return geometry !== null && highlightMatchesBox(geometry, box);
 }
 
 export interface HighlightInfo {
@@ -283,20 +357,22 @@ export async function inspectHighlightAt(
 	const annots = page.node.lookupMaybe(PDFName.of('Annots'), PDFArray);
 	if (!annots) return null;
 
+	const candidates: { geometry: HighlightGeometry; ref: ReturnType<PDFArray['get']> }[] = [];
 	for (let i = 0; i < annots.size(); i++) {
 		const ref = annots.get(i);
-		if (isOverlappingHighlight(context, ref, box)) {
-			return { note: readNote(context.lookup(ref, PDFDict)) };
-		}
+		const geometry = readHighlightGeometry(context, ref);
+		if (geometry) candidates.push({ geometry, ref });
 	}
-	return null;
+
+	const best = pickBestMatch(candidates, box);
+	return best ? { note: readNote(context.lookup(best.ref, PDFDict)) } : null;
 }
 
 /** Every /Highlight annotation on a page, in /Annots order, reduced to just
  * what a click lookup needs. */
 export interface IndexedHighlight {
-	/** The annotation's /Rect, the same box isOverlappingHighlight compares. */
-	box: PdfBox;
+	/** The same geometry isOverlappingHighlight compares against. */
+	geometry: HighlightGeometry;
 	note: string | null;
 }
 
@@ -307,10 +383,11 @@ export type HighlightIndex = Map<number, IndexedHighlight[]>;
  * lookup needs, so repeated clicks don't each re-read and re-parse the whole
  * file (a real stall on a large PDF, on the tap path where it is most visible).
  *
- * Deliberately built from exactly what inspectHighlightAt inspects -- the /Rect
- * and /Contents of each /Highlight, in /Annots order -- so a lookup against the
- * index and a lookup against the bytes cannot disagree. tests/annotate.test.ts
- * pins that equivalence. */
+ * Deliberately built from exactly what inspectHighlightAt inspects -- the
+ * geometry and /Contents of each /Highlight, in /Annots order -- and resolved
+ * by the same pickBestMatch, so a lookup against the index and a lookup
+ * against the bytes cannot disagree. tests/annotate.test.ts pins that
+ * equivalence. */
 export async function buildHighlightIndex(pdfBytes: Uint8Array): Promise<HighlightIndex> {
 	const pdfDoc = await loadPdfDoc(pdfBytes);
 	const context = pdfDoc.context;
@@ -322,12 +399,10 @@ export async function buildHighlightIndex(pdfBytes: Uint8Array): Promise<Highlig
 
 		const found: IndexedHighlight[] = [];
 		for (let i = 0; i < annots.size(); i++) {
-			const dict = context.lookup(annots.get(i), PDFDict);
-			if (dict.get(PDFName.of('Subtype'))?.toString() !== '/Highlight') continue;
-			const rectArray = context.lookupMaybe(dict.get(PDFName.of('Rect')), PDFArray);
-			if (!rectArray) continue;
-			const [left, bottom, right, top] = rectArray.asArray().map((o) => (o as PDFNumber).asNumber());
-			found.push({ box: { left: left!, bottom: bottom!, right: right!, top: top! }, note: readNote(dict) });
+			const ref = annots.get(i);
+			const geometry = readHighlightGeometry(context, ref);
+			if (!geometry) continue;
+			found.push({ geometry, note: readNote(context.lookup(ref, PDFDict)) });
 		}
 		if (found.length > 0) index.set(pageIndex, found);
 	});
@@ -335,11 +410,11 @@ export async function buildHighlightIndex(pdfBytes: Uint8Array): Promise<Highlig
 	return index;
 }
 
-/** The indexed equivalent of inspectHighlightAt: first highlight on the page
- * whose box overlaps, or null. */
+/** The indexed equivalent of inspectHighlightAt: the highlight on the page the
+ * given box resolves to, or null. */
 export function findHighlightInIndex(index: HighlightIndex, options: RemoveHighlightsOptions): HighlightInfo | null {
 	const { pageIndex, box } = options;
-	const found = index.get(pageIndex)?.find((highlight) => boxesOverlap(highlight.box, box));
+	const found = pickBestMatch(index.get(pageIndex) ?? [], box);
 	return found ? { note: found.note } : null;
 }
 
@@ -388,8 +463,13 @@ export interface SetNoteOptions extends RemoveHighlightsOptions {
 	note: string;
 }
 
-/** Sets (or clears) the /Contents comment on every /Highlight annotation
- * overlapping the given box. /Contents is the standard place PDF viewers keep
+/** Sets (or clears) the /Contents comment on the *one* /Highlight annotation
+ * the given box resolves to (see pickBestMatch). A note belongs to a single
+ * highlight: this is only ever called with the point the user clicked, and
+ * writing to every match instead meant a note typed on one highlight also
+ * appeared on a neighbour it happened to overlap.
+ *
+ * /Contents is the standard place PDF viewers keep
  * an annotation's comment, so the note travels with the file and shows up in
  * Adobe/Preview popups too. Stored as a PDFHexString (UTF-16BE) so non-ASCII
  * text -- accents, ñ -- round-trips intact. */
@@ -409,27 +489,32 @@ export async function setHighlightNoteAt(
 		return { bytes: pdfBytes, updatedCount: 0 };
 	}
 
-	let updatedCount = 0;
+	const candidates: { geometry: HighlightGeometry; ref: ReturnType<PDFArray['get']> }[] = [];
 	for (let i = 0; i < annots.size(); i++) {
 		const ref = annots.get(i);
-		if (!isOverlappingHighlight(context, ref, box)) continue;
-		const dict = context.lookup(ref, PDFDict);
-		if (trimmed) dict.set(PDFName.of('Contents'), PDFHexString.fromText(trimmed));
-		else dict.delete(PDFName.of('Contents'));
-		updatedCount++;
+		const geometry = readHighlightGeometry(context, ref);
+		if (geometry) candidates.push({ geometry, ref });
 	}
 
-	if (updatedCount === 0) {
+	const target = pickBestMatch(candidates, box);
+	if (!target) {
 		return { bytes: pdfBytes, updatedCount: 0 };
 	}
+
+	const dict = context.lookup(target.ref, PDFDict);
+	if (trimmed) dict.set(PDFName.of('Contents'), PDFHexString.fromText(trimmed));
+	else dict.delete(PDFName.of('Contents'));
+	const updatedCount = 1;
 
 	const savedBytes = await savePdfDoc(pdfDoc);
 	await verifySavedBytes(savedBytes, pdfDoc.getPageCount(), pageIndex, annots.size());
 	return { bytes: savedBytes, updatedCount };
 }
 
-/** Removes every /Highlight annotation on the page whose Rect overlaps the given
- * box. Other annotation types (links, form widgets, etc.) are never touched. */
+/** Removes every /Highlight annotation on the page painting over the given box
+ * -- "remove whatever my selection crosses", so unlike the note write this
+ * stays all-matching. Other annotation types (links, form widgets, etc.) are
+ * never touched. */
 export async function removeHighlightsAt(
 	pdfBytes: Uint8Array,
 	options: RemoveHighlightsOptions,

@@ -13,6 +13,7 @@ import { shouldReplacePendingUpdate, type SelectionUpdateMode } from './selectio
 import { HighlightListModal } from './ui/highlights-modal';
 import {
 	clientRectToPageLocal,
+	dropDegenerateRects,
 	domRectToPdfBox,
 	selectionRectsToQuadPoints,
 	HIGHLIGHT_EXPAND_TOP,
@@ -34,11 +35,14 @@ import {
 } from './annotate';
 import { collectHighlights, type PdfJsDocument } from './pdf-highlights';
 import {
+	annotationSubpath,
 	buildEntryLink,
 	exportNotePath,
 	formatExportBody,
 	mergeExportedNote,
+	siblingNotePath,
 } from './highlight-export';
+import { buildFlashcardBlocks, mergeFlashcardNote } from './flashcards';
 import { normalizeQuote } from './pdf-text-extraction';
 import {
 	DEFAULT_SETTINGS,
@@ -343,6 +347,17 @@ export default class PdfHighlighterPlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: 'sync-flashcards',
+			name: 'Create flashcards from highlights with notes',
+			checkCallback: (checking) => {
+				const pdfView = getActivePdfView(this.app);
+				if (!pdfView) return false;
+				if (!checking) void this.syncFlashcards(pdfView);
+				return true;
+			},
+		});
+
+		this.addCommand({
 			id: 'remove-highlight-at-selection',
 			name: 'Remove highlight at selection',
 			checkCallback: (checking) => {
@@ -444,7 +459,14 @@ export default class PdfHighlighterPlugin extends Plugin {
 
 		const clientRects = Array.from(range.getClientRects());
 		if (clientRects.length === 0) return null;
-		const pageLocalRects: PageLocalRect[] = clientRects.map((r) => clientRectToPageLocal(r, pageOrigin));
+		// Filtered here rather than only inside selectionRectsToQuadPoints so the
+		// curtain's painted preview is built from the same rects the annotation
+		// is, and a selection that is *only* collapsed rects fails as "no usable
+		// selection" instead of throwing out of the highlight command.
+		const pageLocalRects: PageLocalRect[] = dropDegenerateRects(
+			clientRects.map((r) => clientRectToPageLocal(r, pageOrigin)),
+		);
+		if (pageLocalRects.length === 0) return null;
 		const viewport = pdfView.getPageViewport(pageIndex);
 
 		return { pdfView, pageIndex, pageLocalRects, viewport, text: selection.toString() };
@@ -711,7 +733,7 @@ export default class PdfHighlighterPlugin extends Plugin {
 						label: info.note ? 'Edit note' : 'Add note',
 						onClick: () => {
 							this.hideActiveMenu();
-							this.activePopup = showNoteEditorPopup(doc, position, {
+							this.activePopup = showNoteEditorPopup(this.app, doc, position, {
 								initial: info.note ?? '',
 								onSave: (note) => {
 									this.hideActiveMenu();
@@ -805,6 +827,71 @@ export default class PdfHighlighterPlugin extends Plugin {
 			);
 		} catch (err) {
 			new Notice(`Study PDF: could not export highlights — ${(err as Error).message}`);
+		}
+	}
+
+	/** Writes new spaced-repetition cards into "<PDF> (flashcards).md".
+	 *
+	 * Append-only by design: the review schedule lives inline next to each card,
+	 * so a card that already exists is never rewritten, even when the highlight's
+	 * note has changed since (that case is counted and reported instead). See
+	 * flashcards.ts. */
+	private async syncFlashcards(pdfView: ActivePdfView) {
+		try {
+			const pdfjsDoc = pdfView.getPdfJsDocument() as PdfJsDocument;
+			const fileBytes = new Uint8Array(await this.app.vault.readBinary(pdfView.file));
+			const entries = await collectHighlights(pdfjsDoc, await getStoredQuotes(fileBytes));
+			const notePath = siblingNotePath(pdfView.file.parent?.path, pdfView.file.basename, 'flashcards');
+			const existingFile = this.app.vault.getAbstractFileByPath(notePath);
+
+			const withNotes = entries.filter((entry) => (entry.note ?? '').trim().length > 0);
+			if (withNotes.length === 0 && !existingFile) {
+				new Notice('Study PDF: add a note to a highlight first — the note becomes the question.');
+				return;
+			}
+			if (existingFile && !(existingFile instanceof TFile)) {
+				new Notice(`Study PDF: "${notePath}" is a folder, not a note.`);
+				return;
+			}
+
+			const blocks = buildFlashcardBlocks(
+				withNotes.map((entry) => ({
+					pageNumber: entry.pageNumber,
+					quote: entry.quote,
+					note: entry.note,
+					// Short alias here, unlike the exported note: the quote is
+					// already the answer, so the link only has to point home.
+					link: this.app.fileManager.generateMarkdownLink(
+						pdfView.file,
+						notePath,
+						annotationSubpath(entry.pageNumber, entry.annotationId),
+						`p. ${entry.pageNumber}`,
+					),
+					// Matched as a substring of the existing note, so it has to
+					// survive both link styles: the bare annotation id does,
+					// while a full subpath can be percent-encoded in Markdown links.
+					key: entry.annotationId ? `annotation=${entry.annotationId}` : entry.quote,
+				})),
+			);
+
+			const existing = existingFile ? await this.app.vault.read(existingFile) : null;
+			const merged = mergeFlashcardNote(existing, blocks);
+			if (existingFile) {
+				if (merged.content !== existing) await this.app.vault.modify(existingFile, merged.content);
+			} else {
+				const created = await this.app.vault.create(notePath, merged.content);
+				await this.app.workspace.getLeaf('tab').openFile(created);
+			}
+
+			const parts = [`${merged.added} new card${merged.added === 1 ? '' : 's'}`];
+			if (merged.updated > 0) parts.push(`${merged.updated} updated`);
+			if (merged.kept > 0) parts.push(`${merged.kept} already there`);
+			if (merged.orphaned > 0) {
+				parts.push(`${merged.orphaned} moved to "Orphaned" (highlight gone; review history kept)`);
+			}
+			new Notice(`Study PDF: ${parts.join(', ')} in ${notePath}.`);
+		} catch (err) {
+			new Notice(`Study PDF: could not sync flashcards — ${(err as Error).message}`);
 		}
 	}
 
