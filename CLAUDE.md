@@ -220,3 +220,8 @@ Releases are built only by GitHub Actions from a pushed tag matching `0.2.1` (no
 prefix); CI fails if `manifest.json`'s version doesn't match the tag. Bump with
 `npm version <x.y.z>`, which runs `version-bump.mjs` to sync `manifest.json` and
 `versions.json`. Never upload release assets from a local machine.
+
+`npm` would tag that bump `v0.4.2`, which matches no workflow trigger and so pushes
+silently without building anything; `.npmrc` sets `tag-version-prefix=""` to prevent it.
+After pushing a tag, confirm the run actually started (`gh run list --workflow=release.yml`)
+— a release that never triggers looks identical to one you haven't checked on yet.
