@@ -40,6 +40,18 @@ mkdir -p "$P" && for f in main.js manifest.json styles.css; do ln -sf "$PWD/$f" 
 npm run build && obsidian plugin:reload id=study-pdf
 ```
 
+`ln -sf` **overwrites the installed release copies** — deleting the links later leaves the
+plugin missing, not restored. Put the release back explicitly (this leaves `data.json`, the
+user's real settings, untouched):
+
+```bash
+gh release download <version> -D /tmp/rel -R gris/study-pdf && for f in main.js manifest.json styles.css; do rm -f "$P/$f" && cp "/tmp/rel/$f" "$P/$f"; done
+```
+
+Live checks run against the user's real vault and its real `data.json`. Anything a check
+changes (the default color, a highlight written into a PDF) is a change to their data —
+note the starting value and restore it.
+
 Then drive and inspect it:
 
 ```bash
@@ -176,8 +188,33 @@ oracle instead of a reimplemented transform.
 ## Lint and release
 
 ESLint is scoped to `src/` on purpose: obsidianmd's `no-nodejs-modules` rule would flag
-test helpers that legitimately use `node:fs`/`node:url`. Two rules are downgraded to
-warnings for version-gated calls in `src/settings.ts`, with the reasoning at each call site.
+test helpers that legitimately use `node:fs`/`node:url`. No rules are downgraded or
+disabled — `npm run lint` is expected to exit with zero warnings, not just zero errors.
+
+`src/settings.ts` implements **both** settings APIs on purpose: `getSettingDefinitions()`
+is what Obsidian 1.13.0+ renders and — the point of it — what the settings search indexes,
+while the deprecated `display()` stays as the fallback for the `minAppVersion` (1.4.4)
+floor. Obsidian skips `display()` entirely when `getSettingDefinitions()` returns a
+non-empty array, so the two never both run. Rows there are `render` definitions rather
+than declarative `control` bindings because the color list is fixed, with a swatch and a
+"default" star instead of an editable value; a `control` binding would also need
+`getControlValue`/`setControlValue` overrides, since the state lives behind `SettingsHost`
+rather than on the plugin.
+
+A declarative row must never repaint by calling `display()` — on that path rows are
+rendered and torn down individually, so the star state is held per row in `starButtons`
+and repainted in place by `syncStars()`.
+
+**`getSettingDefinitions()` must be pure.** It is *not* called per render: the framework
+stores its result in `tab.settingItems` at registration (and on `update()`, for search
+indexing) and renders every subsequent tab open from that cached array. A wrapped
+`getSettingDefinitions` logged zero calls across two tab opens that rendered all five
+rows. Clearing render-time state inside it therefore wipes state the live rows still
+depend on — that version saved the new default correctly while no star ever moved.
+Ordering of a re-render, from the same instrumented log, is `cleanup×5` then `render×5`.
+The identity check in the row cleanup and the `isConnected` eviction in `syncStars()` are
+belt-and-braces against that order not holding everywhere; the load-bearing fix is the
+absent `clear()`.
 
 Releases are built only by GitHub Actions from a pushed tag matching `0.2.1` (no `v`
 prefix); CI fails if `manifest.json`'s version doesn't match the tag. Bump with

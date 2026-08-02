@@ -1,7 +1,7 @@
 // Plugin settings: the highlight color palette and the settings tab UI.
 // Deliberately independent of main.ts / the Obsidian-internals adapter --
 // this only touches the well-documented Plugin/PluginSettingTab/Setting APIs.
-import { App, PluginSettingTab, Setting } from 'obsidian';
+import { App, PluginSettingTab, Setting, type ExtraButtonComponent, type SettingDefinitionItem } from 'obsidian';
 import type { RgbColor } from './annotate';
 
 export interface HighlightColorOption {
@@ -62,36 +62,73 @@ export class PdfHighlighterSettingTab extends PluginSettingTab {
 		this.host = host;
 	}
 
-	/** Adds the color swatch + "set as default" star to a Setting row.
-	 * Re-renders the whole tab after a change, since every row's star state
-	 * depends on which color is now the default. */
+	/** Star buttons by color name, so picking a new default can repaint every
+	 * row's star in place. The declarative path renders rows independently,
+	 * so there is no whole-tab re-render to fall back on. */
+	private readonly starButtons = new Map<string, ExtraButtonComponent>();
+
+	/** Adds the color swatch + "set as default" star to a Setting row. */
 	private buildColorRow(setting: Setting, color: HighlightColorOption) {
 		// Show the (fixed) color as a plain swatch, not an editable picker.
 		const swatch = setting.controlEl.createSpan({ cls: 'study-pdf-color-dot' });
 		swatch.setCssStyles({ backgroundColor: color.hex });
 		setting.addExtraButton((button) => {
-			const isDefault = color.name === this.host.settings.defaultColorName;
-			button
-				.setIcon('star')
-				.setTooltip(isDefault ? 'Default color' : 'Set as default color')
-				.onClick(async () => {
-					this.host.settings.defaultColorName = color.name;
-					await this.host.saveSettings();
-					this.display();
-				});
-			// A hover-only background isn't a persistent indicator -- fill the
-			// star so the default color is visible at a glance, not just on hover.
-			button.extraSettingsEl.toggleClass('study-pdf-default-star', isDefault);
+			this.starButtons.set(color.name, button);
+			button.setIcon('star').onClick(async () => {
+				this.host.settings.defaultColorName = color.name;
+				await this.host.saveSettings();
+				this.syncStars();
+			});
+			this.syncStar(color.name, button);
 		});
 	}
 
-	/** Obsidian's newer declarative settings API (getSettingDefinitions())
-	 * requires 1.13.0, which is currently Catalyst-tier early access only --
-	 * not something most users can install yet. Sticking to the classic
-	 * imperative display() keeps the plugin installable broadly. */
+	private syncStar(name: string, button: ExtraButtonComponent) {
+		const isDefault = name === this.host.settings.defaultColorName;
+		button.setTooltip(isDefault ? 'Default color' : 'Set as default color');
+		// A hover-only background isn't a persistent indicator -- fill the
+		// star so the default color is visible at a glance, not just on hover.
+		button.extraSettingsEl.toggleClass('study-pdf-default-star', isDefault);
+	}
+
+	/** Repaints every live star, dropping rows whose element is gone -- the map
+	 * is keyed by color name, so it can outlive the row it describes. */
+	private syncStars() {
+		for (const [name, button] of this.starButtons) {
+			if (button.extraSettingsEl.isConnected) this.syncStar(name, button);
+			else this.starButtons.delete(name);
+		}
+	}
+
+	/** The declarative settings API (Obsidian 1.13.0+). Rows built this way
+	 * are indexed by the settings search; display() below is not called at
+	 * all when this returns a non-empty array. */
+	getSettingDefinitions(): SettingDefinitionItem[] {
+		return [
+			{
+				type: 'group',
+				heading: 'Highlight colors',
+				items: this.host.settings.colors.map((color) => ({
+					name: color.name,
+					aliases: ['default highlight color', color.hex],
+					render: (setting: Setting) => {
+						this.buildColorRow(setting, color);
+						const own = this.starButtons.get(color.name);
+						return () => {
+							if (this.starButtons.get(color.name) === own) this.starButtons.delete(color.name);
+						};
+					},
+				})),
+			},
+		];
+	}
+
+	/** Fallback for Obsidian older than 1.13.0, which has no
+	 * getSettingDefinitions() and renders the tab from here instead. */
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
+		this.starButtons.clear();
 
 		new Setting(containerEl).setName('Highlight colors').setHeading();
 
