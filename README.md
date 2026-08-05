@@ -78,6 +78,9 @@ plugin fails loudly with a clear message rather than misbehaving silently.
 
 ## Development
 
+Bug-fix PRs are welcome; please open an issue before building a feature — see
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
 ```bash
 npm install
 npm run dev     # esbuild watch mode
