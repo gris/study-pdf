@@ -7,6 +7,7 @@ import {
 } from './obsidian-pdf-internals';
 import { showIconPopup, showNoteEditorPopup, type IconPopup, type PopupButton } from './ui/icon-popup';
 import { showReloadCurtain, type CurtainPaint } from './ui/reload-curtain';
+import { preserveReadingPosition } from './preserve-reading-position';
 import { createSelectionOverlay, type SelectionOverlay } from './ui/selection-overlay';
 import { classifyPointerGesture } from './tap-gesture';
 import { shouldReplacePendingUpdate, type SelectionUpdateMode } from './selection-scheduler';
@@ -934,6 +935,7 @@ export default class PdfHighlighterPlugin extends Plugin {
 			opacity: 1,
 		} || undefined;
 		const curtain = showReloadCurtain(this.app, pdfView, paint);
+		const position = preserveReadingPosition(this.app, pdfView);
 		window.getSelection()?.removeAllRanges();
 		this.hideActiveMenu();
 
@@ -952,6 +954,7 @@ export default class PdfHighlighterPlugin extends Plugin {
 			await this.app.vault.modifyBinary(pdfView.file, toArrayBuffer(highlighted));
 		} catch (err) {
 			curtain?.cancel();
+			position?.cancel();
 			console.error('Study PDF: failed to add highlight', err);
 			new Notice(`Study PDF: failed to add highlight -- ${(err as Error).message}`, 0);
 		}
@@ -983,11 +986,13 @@ export default class PdfHighlighterPlugin extends Plugin {
 		if (!pdfView) return;
 
 		const curtain = showReloadCurtain(this.app, pdfView);
+		const position = preserveReadingPosition(this.app, pdfView);
 		try {
 			const existingBytes = await this.app.vault.readBinary(pdfView.file);
 			const result = await setHighlightNoteAt(new Uint8Array(existingBytes), { pageIndex, box, note });
 			if (result.updatedCount === 0) {
 				curtain?.cancel();
+				position?.cancel();
 				new Notice('Study PDF: no highlight found where you clicked.');
 				return;
 			}
@@ -995,6 +1000,7 @@ export default class PdfHighlighterPlugin extends Plugin {
 			await this.app.vault.modifyBinary(pdfView.file, toArrayBuffer(result.bytes));
 		} catch (err) {
 			curtain?.cancel();
+			position?.cancel();
 			console.error('Study PDF: failed to save note', err);
 			new Notice(`Study PDF: failed to save note -- ${(err as Error).message}`, 0);
 		}
@@ -1008,12 +1014,14 @@ export default class PdfHighlighterPlugin extends Plugin {
 		// preview here: the old pixels still show the highlight until the
 		// reloaded, highlight-free page fades in).
 		const curtain = showReloadCurtain(this.app, pdfView);
+		const position = preserveReadingPosition(this.app, pdfView);
 		this.hideActiveMenu();
 		try {
 			const existingBytes = await this.app.vault.readBinary(pdfView.file);
 			const result = await removeHighlightsAt(new Uint8Array(existingBytes), { pageIndex, box });
 			if (result.removedCount === 0) {
 				curtain?.cancel();
+				position?.cancel();
 				new Notice('Study PDF: no highlight found where you clicked.');
 				return;
 			}
@@ -1021,6 +1029,7 @@ export default class PdfHighlighterPlugin extends Plugin {
 			await this.app.vault.modifyBinary(pdfView.file, toArrayBuffer(result.bytes));
 		} catch (err) {
 			curtain?.cancel();
+			position?.cancel();
 			console.error('Study PDF: failed to remove highlight', err);
 			new Notice(`Study PDF: failed to remove highlight -- ${(err as Error).message}`, 0);
 		}

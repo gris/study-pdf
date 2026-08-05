@@ -2,11 +2,14 @@
 // disk, Obsidian's PDF view runs a full `viewer.loadFile()` -- it destroys and
 // asynchronously rebuilds every page canvas (confirmed by reading Obsidian's
 // shipped app.js), which flashes blank pages for a moment. Instead of fighting
-// that reload (it also handles scroll restore, subpaths, and password prompts),
-// we cover the visible pages with pixel-identical snapshots of their current
-// canvases just before writing the file, and remove each snapshot as soon as
-// its own page has finished re-rendering. Purely cosmetic: if detection ever
-// fails, a timeout removes the overlay and behavior degrades to a flicker.
+// that reload (it also handles subpaths and password prompts), we cover the
+// visible pages with pixel-identical snapshots of their current canvases just
+// before writing the file, and remove each snapshot as soon as its own page has
+// finished re-rendering. Purely cosmetic: if detection ever fails, a timeout
+// removes the overlay and behavior degrades to a flicker.
+//
+// The reload does NOT reliably restore the reading position, which is why the
+// per-page release above can't be the only release path -- see isDocumentLive.
 import type { App } from 'obsidian';
 import { getActivePdfView, type ActivePdfView } from '../obsidian-pdf-internals';
 
@@ -21,6 +24,11 @@ const POLL_INTERVAL_MS = 50;
 // appears instantly), so the failsafe must cover compute + write + reload.
 const TIMEOUT_MS = 4000;
 const FADE_MS = 120;
+// Once *some* page of the reloaded document has painted, how long to keep
+// holding snapshots over the pages that haven't. Long enough for a second
+// visible page to finish rendering, short enough that a page the reload
+// abandoned can't freeze the view.
+const GRACE_MS = 300;
 
 /** A just-created highlight to paint into the page snapshot, so the user sees
  * the result instantly while the actual PDF write + reload happen underneath. */
@@ -38,9 +46,6 @@ interface CapturedPage {
 	pageNumber: string;
 	oldCanvas: HTMLCanvasElement;
 	snapshot: HTMLCanvasElement;
-	/** On-screen visible area at capture time; the page with the largest area is
-	 * the "primary" page whose re-render signals that the new document is live. */
-	visibleArea: number;
 	done: boolean;
 }
 
@@ -106,9 +111,7 @@ export function showReloadCurtain(app: App, pdfView: ActivePdfView, paint?: Curt
 			height: `${rect.height}px`,
 		});
 
-		const visibleArea =
-			Math.max(0, Math.min(rect.bottom, win.innerHeight) - Math.max(rect.top, 0)) * rect.width;
-		captured.push({ pageNumber, oldCanvas: canvas, snapshot, visibleArea, done: false });
+		captured.push({ pageNumber, oldCanvas: canvas, snapshot, done: false });
 	}
 
 	if (captured.length === 0) {
@@ -132,7 +135,22 @@ export function showReloadCurtain(app: App, pdfView: ActivePdfView, paint?: Curt
 		if (captured.every((p) => p.done)) releaseAll();
 	};
 
-	const primary = captured.reduce((a, b) => (b.visibleArea > a.visibleArea ? b : a));
+	const oldCanvases = new Set(captured.map((p) => p.oldCanvas));
+	/** True once any page of the *reloaded* document has finished painting. This
+	 * is deliberately not keyed to a page number: measured live, Obsidian's reload
+	 * can land back on page 1 rather than where the reader was, leaving the pages
+	 * we snapshotted present but blank and never re-rendered. Waiting for them by
+	 * number therefore hung until the failsafe -- 4s on every single write. */
+	const isDocumentLive = (view: ActivePdfView): boolean => {
+		for (const pageEl of Array.from(view.containerEl.querySelectorAll<HTMLElement>('div.page[data-page-number]'))) {
+			const canvas = pageEl.querySelector('canvas');
+			if (!canvas || oldCanvases.has(canvas)) continue;
+			const pageNumber = parseInt(pageEl.getAttribute('data-page-number') ?? '', 10);
+			if (pageNumber > 0 && view.isPageRenderFinished(pageNumber - 1)) return true;
+		}
+		return false;
+	};
+
 	const isPageReady = (view: ActivePdfView, page: CapturedPage): boolean => {
 		const canvas = view.containerEl.querySelector<HTMLCanvasElement>(
 			`div.page[data-page-number="${page.pageNumber}"] canvas`,
@@ -143,6 +161,7 @@ export function showReloadCurtain(app: App, pdfView: ActivePdfView, paint?: Curt
 	};
 
 	const startedAt = Date.now();
+	let liveAt = 0;
 	const poll = () => {
 		if (released) return;
 		if (Date.now() - startedAt > TIMEOUT_MS) return releaseAll();
@@ -158,17 +177,14 @@ export function showReloadCurtain(app: App, pdfView: ActivePdfView, paint?: Curt
 		for (const page of captured) {
 			if (!page.done && isPageReady(view, page)) releaseOne(page);
 		}
-		// Once the primary (most visible) page is live, the new document is
-		// rendering: any captured page whose page element no longer exists has
-		// been virtualized off-screen and will never re-render -- don't hold its
-		// snapshot (this is what previously kept the curtain up for seconds on
-		// large documents).
-		if (primary.done) {
-			for (const page of captured) {
-				if (!page.done && !view.containerEl.querySelector(`div.page[data-page-number="${page.pageNumber}"]`)) {
-					releaseOne(page);
-				}
-			}
+		// A page we snapshotted may simply never come back: the reload can be
+		// virtualized past it, or land on a different page entirely and leave it
+		// blank. So the moment any page of the new document has painted, start a
+		// short grace period for the stragglers and then drop the lot -- a brief
+		// flicker beats a frozen snapshot sitting over a live viewer.
+		if (!released) {
+			if (liveAt === 0 && isDocumentLive(view)) liveAt = Date.now();
+			if (liveAt !== 0 && Date.now() - liveAt >= GRACE_MS) return releaseAll();
 		}
 		if (!released) timer = win.setTimeout(poll, POLL_INTERVAL_MS);
 	};

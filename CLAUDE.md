@@ -143,6 +143,16 @@ oracle instead of a reimplemented transform.
   pointer/selection events to a vault note, dumped from the phone via a debug command.
   For any iOS-only behaviour, record what the device actually does before theorising —
   the round trip is cheaper than a confident wrong fix.
+- **Obsidian's reload does not reliably restore the reading position**, and on the
+  documents where it doesn't, it lands on page 1. Measured live: highlighting on page 4
+  of a 7-page PDF left `currentPageNumber === 1` with pages 3-7 unrendered. This is why
+  `preserve-reading-position.ts` exists. It also used to make every write feel slow for a
+  reason that looked nothing like a scroll bug: the reload curtain waited for the pages it
+  had snapshotted to re-render, an abandoned page never does, so the curtain burned its
+  full 4s failsafe on *every* highlight while the actual PDF write took ~80ms. Hence
+  `isDocumentLive` — the curtain must never key its release to a particular page number.
+  Both symptoms were one bug; if writes ever feel slow again, log which release path fired
+  before assuming the curtain itself is the cost.
 - **Pinch-zoom flicker and page-jumping on iOS are not this plugin's.** Confirmed by the
   cleanest possible control: with Study PDF fully disabled, an iPhone still flickers each
   page blank while pdf.js re-rasterises at the new scale, and still sometimes lands on a

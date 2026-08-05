@@ -41,6 +41,14 @@ export interface ActivePdfView {
 	getPdfJsDocument(): unknown;
 	/** Scrolls the viewer to the given 1-based page number. */
 	goToPage(pageNumber: number): void;
+	/** The 1-based page the viewer is currently showing, or 0 if it can't be
+	 * read. Captured before a write so the reading position survives Obsidian's
+	 * full view reload -- see preserve-reading-position.ts. */
+	getCurrentPageNumber(): number;
+	/** Total pages in the loaded document, or 0 while none is loaded. A reloaded
+	 * viewer reports 0 until the new document is laid out, which is what makes it
+	 * usable as a "is the new document ready to be scrolled?" signal. */
+	getPageCount(): number;
 	/** The (otherwise empty) right-hand section of this PDF view's own toolbar
 	 * (`div.pdf-toolbar-right`, sits after the page-number field) -- confirmed
 	 * from Obsidian's shipped app.js as an intentionally bare container the
@@ -76,6 +84,7 @@ interface PdfJsPdfViewer {
 	getPageView: (pageIndex: number) => PdfJsPageView | undefined;
 	pdfDocument?: PdfJsDocumentLike;
 	currentPageNumber: number;
+	pagesCount?: number;
 }
 
 interface PdfJsAnnotationData {
@@ -193,6 +202,16 @@ function buildPdfView(leaf: WorkspaceLeaf): ActivePdfView | null {
 
 		goToPage(pageNumber: number): void {
 			pdfViewer.currentPageNumber = pageNumber;
+		},
+
+		getCurrentPageNumber(): number {
+			const n = pdfViewer.currentPageNumber;
+			return typeof n === 'number' && n > 0 ? n : 0;
+		},
+
+		getPageCount(): number {
+			const n = pdfViewer.pagesCount;
+			return typeof n === 'number' && n > 0 ? n : 0;
 		},
 
 		getToolbarRightElement(): HTMLElement | null {
