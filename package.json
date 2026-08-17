@@ -14,18 +14,18 @@
 	"keywords": [],
 	"license": "MIT",
 	"dependencies": {
-		"@cantoo/pdf-lib": "^2.8.1"
+		"@cantoo/pdf-lib": "^2.8.4"
 	},
 	"devDependencies": {
 		"@types/node": "^26.2.0",
-		"esbuild": "0.28.1",
+		"esbuild": "0.28.2",
 		"eslint": "^10.8.1",
 		"eslint-plugin-obsidianmd": "^0.4.1",
 		"obsidian": "latest",
 		"pdfjs-dist": "^6.2.108",
-		"tsx": "^4.23.4",
+		"tsx": "^4.23.12",
 		"typescript": "^6.0.3",
-		"typescript-eslint": "^8.66.0",
+		"typescript-eslint": "^8.67.0",
 		"vitest": "^4.1.10"
 	}
 }
