@@ -17,7 +17,7 @@
 		"@cantoo/pdf-lib": "^2.8.1"
 	},
 	"devDependencies": {
-		"@types/node": "^26.1.2",
+		"@types/node": "^26.2.0",
 		"esbuild": "0.28.1",
 		"eslint": "^10.8.1",
 		"eslint-plugin-obsidianmd": "^0.4.1",
