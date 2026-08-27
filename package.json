@@ -14,7 +14,7 @@
 	"keywords": [],
 	"license": "MIT",
 	"dependencies": {
-		"@cantoo/pdf-lib": "^2.8.4"
+		"@cantoo/pdf-lib": "^2.9.1"
 	},
 	"devDependencies": {
 		"@types/node": "^26.2.0",
