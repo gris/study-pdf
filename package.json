@@ -22,7 +22,7 @@
 		"eslint": "^10.9.0",
 		"eslint-plugin-obsidianmd": "^0.4.2",
 		"obsidian": "latest",
-		"pdfjs-dist": "^6.2.108",
+		"pdfjs-dist": "^6.3.289",
 		"tsx": "^4.23.13",
 		"typescript": "^6.0.3",
 		"typescript-eslint": "^8.67.0",
